@@ -89,7 +89,7 @@ Built collaboratively by student engineers.
 
 Install the following tools:
 
-- Python 3.11 or newer (recommended: Python 3.12)
+- Python 3.11 or newer (recommended: Python 3.13)
 - Git
 - PostgreSQL (for database-backed development)
 - Redis (for background Celery tasks)
@@ -105,7 +105,7 @@ cd services/api
 ### 2. Create a Python Virtual Environment
 
 ```powershell
-py -3.12 -m venv .venv
+py -3.13 -m venv .venv
 ```
 
 If Python 3.12 is not installed, use an installed supported version:
@@ -191,4 +191,5 @@ deactivate
   include the change in your pull request.
 - The Django project settings and database configuration
   must be implemented before migrations or the server can run.
+
 
