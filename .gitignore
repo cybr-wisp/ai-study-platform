@@ -1,0 +1,40 @@
+﻿# Environment and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Next.js
+.next/
+out/
+dist/
+build/
+
+# Testing
+coverage/
+playwright-report/
+test-results/
+
+# IDE and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# User data
+uploads/
+local-data/
+*.sqlite3
