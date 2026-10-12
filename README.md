@@ -25,7 +25,7 @@ interactive learning experiences.
 | Component | Technology |
 |-----------|------------|
 | Frontend | Next.js, React, TypeScript |
-| Backend | Python, FastAPI |
+| Backend | Python, Django, Django REST Framework |
 | Database | PostgreSQL, pgvector |
 | Cache and Jobs | Redis, Celery |
 | AI | LLMs, RAG, Embeddings |
@@ -36,7 +36,7 @@ interactive learning experiences.
 ## Repository Structure
 
     apps/       Student application and marketing website
-    services/   Backend API and background workers
+    services/   Django REST API and background workers
     packages/   Shared frontend libraries and contracts
     ml/         Adaptive learning and model evaluation
     infra/      Deployment and infrastructure
@@ -81,3 +81,4 @@ or student personal information.
 ## Team
 
 Built collaboratively by student engineers.
+
