@@ -3,6 +3,11 @@ Django>=5.2,<6.0
 djangorestframework>=3.16,<4.0
 django-cors-headers>=4.7,<5.0
 django-environ>=0.12,<1.0
+djangorestframework_simplejwt==5.5.1
+django-filter==26.2
+
+# Backend utilities
+dotenv==0.9.9
 
 # Database
 psycopg[binary]>=3.2,<4.0
