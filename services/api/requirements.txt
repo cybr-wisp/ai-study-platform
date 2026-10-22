@@ -4,6 +4,9 @@ djangorestframework>=3.16,<4.0
 django-cors-headers>=4.7,<5.0
 django-environ>=0.12,<1.0
 
+# Backend utilities
+dotenv==0.9.9
+
 # Database
 psycopg[binary]>=3.2,<4.0
 pgvector>=0.4,<1.0
@@ -29,3 +32,6 @@ ruff>=0.13,<1.0
 
 # Production server
 gunicorn>=23.0,<24.0
+
+# OpenAPI spec
+PyYAML==6.0.3

@@ -1,0 +1,2316 @@
+openapi: 3.1.0
+info:
+  title: Study Platform API
+  version: 2.0.0
+  description: |
+    Backend API for an AI study platform. Primary workflow:
+    upload lecture notes -> AI generates study materials -> student practices with flashcards and questions -> progress is tracked.
+
+    This document is the single source of truth for the Django backend.
+
+    Django apps and what they own
+
+    | App | Owns | Depends on |
+    |---|---|---|
+    | accounts | User, registration, tokens, current user | none |
+    | courses | Course | accounts |
+    | materials | Document, DocumentChunk, AIJob (the AI pipeline queue) | courses |
+    | study_kits | StudyKit, KeyConcept | courses, materials |
+    | flashcards | Flashcard | study_kits, materials |
+    | practice_tests | PracticeTest, TestQuestion, TestAttempt, TestAnswer | accounts, courses, study_kits, materials |
+    | learning | StudySession, CardProgress, CardReview (active recall) | accounts, courses, study_kits, flashcards |
+    | analytics | Read-only dashboard and progress reports (no models) | reads from all of the above |
+    | billing | Reserved, not part of the initial tasks (no models or endpoints yet) | none |
+
+    The dependency column is a strict DAG. Models only point at apps higher up the table, which keeps migrations free of circular dependencies. `AIJob` lives in `materials` for that reason: it is the lowest app that every generating app can reference, and generated objects (`StudyKit.generation_job`, `PracticeTest.generation_job`, `TestAttempt.grading_job`) point at the job rather than the job pointing back at them.
+
+    Every URL is mounted at `/api/v1/<url_prefix>/` where the prefix is declared under `x-django.apps` (the app name with underscores replaced by hyphens). Each app's `urls.py` registers only its own routes.
+
+    Spec extensions the generator reads
+    - Component schemas that carry `x-django-model` are database tables. Its `app` key names the owning Django app. Properties that carry `x-django-field` are columns (or many-to-many relations). Properties without it are API-only (derived, nested or computed) and never reach the database.
+    - Component schemas with `x-django-enum` become `models.TextChoices` classes in the named app. A property that `$ref`s one of them is given `choices=` automatically.
+    - Tags carry `x-django-app` and `x-django-viewsets`, and operations carry `x-django-action` or `x-django-view`. These are routing and queryset guidance for the hand-written DRF views. The generator does not emit them.
+    - `tools/generate_django.py` writes `<app>/models.py` and `<app>/serializers.py` for every app that owns models. A schema `FooPublic` next to a model `Foo` also yields `FooPublicSerializer` (read-only, restricted to the listed columns). `manage.py makemigrations` then produces one initial migration per app.
+    - API-only properties (no `x-django-field`) are computed in the view layer, usually with queryset annotations.
+
+    Conventions
+    - All requests and responses are JSON unless noted. Timestamps are ISO 8601 UTC.
+    - Every resource is private to the authenticated user. Ownership is resolved through `Course.owner`; other users' objects return 404.
+    - Collections are page-number paginated (`page`, `page_size`, default 20, max 100).
+    - Long-running AI work returns 202 with an `AIJob`; clients poll `GET /materials/jobs/{jobId}` or re-fetch the resource until its `status` is `ready`.
+    - Fields marked `readOnly` are ignored on write.
+servers:
+  - url: /api/v1
+security:
+  - bearerAuth: []
+x-django:
+  django_version: "5.2"
+  default_auto_field: django.db.models.BigAutoField
+  api_framework: django-rest-framework
+  auth_user_model: accounts.User
+  apps:
+    accounts: {url_prefix: accounts}
+    analytics: {url_prefix: analytics}
+    billing: {url_prefix: billing}
+    courses: {url_prefix: courses}
+    flashcards: {url_prefix: flashcards}
+    learning: {url_prefix: learning}
+    materials: {url_prefix: materials}
+    practice_tests: {url_prefix: practice-tests}
+    study_kits: {url_prefix: study-kits}
+tags:
+  - name: accounts
+    description: Registration, token issuing and the current user.
+    x-django-app: accounts
+    x-django-viewsets: []
+  - name: analytics
+    description: Aggregated, read-only reports for the dashboard and progress screens.
+    x-django-app: analytics
+    x-django-viewsets: []
+  - name: billing
+    description: Reserved. Plans, subscriptions and AI usage limits are not part of the initial tasks, so this app owns no models or endpoints yet.
+    x-django-app: billing
+    x-django-viewsets: []
+  - name: courses
+    description: Course creation, editing and organization.
+    x-django-app: courses
+    x-django-viewsets:
+      - {name: CourseViewSet, route: '', model: Course, queryset_scope: owner, filterset_fields: [is_archived], search_fields: [title, code, term], ordering_fields: [position, title, created_at]}
+  - name: materials
+    description: Uploaded PDFs, slides and notes, their extracted text, and the AI job queue.
+    x-django-app: materials
+    x-django-viewsets:
+      - {name: DocumentViewSet, route: documents, model: Document, queryset_scope: course__owner, filterset_fields: [course, status, file_type], search_fields: [title, original_filename], parser_classes: [MultiPartParser, FormParser, JSONParser]}
+      - {name: DocumentChunkViewSet, route: chunks, model: DocumentChunk, queryset_scope: document__course__owner, mixins: [RetrieveModelMixin]}
+      - {name: AIJobViewSet, route: jobs, model: AIJob, queryset_scope: course__owner, filterset_fields: [course, job_type, status], mixins: [ListModelMixin, RetrieveModelMixin]}
+  - name: study_kits
+    description: AI-generated summaries, key concepts and study guides.
+    x-django-app: study_kits
+    x-django-viewsets:
+      - {name: StudyKitViewSet, route: '', model: StudyKit, queryset_scope: course__owner, filterset_fields: [course, status]}
+  - name: flashcards
+    description: AI-generated and manual flashcards.
+    x-django-app: flashcards
+    x-django-viewsets:
+      - {name: FlashcardViewSet, route: '', model: Flashcard, queryset_scope: study_kit__course__owner, filterset_fields: [study_kit, difficulty, is_archived]}
+  - name: learning
+    description: Active recall sessions, confidence-rated reviews and struggling-card prioritization.
+    x-django-app: learning
+    x-django-viewsets:
+      - {name: StudySessionViewSet, route: sessions, model: StudySession, queryset_scope: user, filterset_fields: [course, study_kit, mode]}
+      - {name: CardProgressViewSet, route: card-progress, model: CardProgress, queryset_scope: user, filterset_fields: [flashcard, flashcard__study_kit, flashcard__study_kit__course], mixins: [ListModelMixin]}
+  - name: practice_tests
+    description: AI-generated multiple-choice and short-answer practice tests with grading and explanations. The attempts route must be registered before the empty route.
+    x-django-app: practice_tests
+    x-django-viewsets:
+      - {name: TestAttemptViewSet, route: attempts, model: TestAttempt, queryset_scope: user, filterset_fields: [status, practice_test], mixins: [RetrieveModelMixin]}
+      - {name: PracticeTestViewSet, route: '', model: PracticeTest, queryset_scope: course__owner, filterset_fields: [course, status, difficulty]}
+
+paths:
+  /accounts/register:
+    post:
+      tags: [accounts]
+      operationId: accounts_register
+      summary: Register a student account
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {$ref: '#/components/schemas/RegisterRequest'}}
+      responses:
+        '201':
+          description: Account created.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/User'}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+
+  /accounts/token:
+    post:
+      tags: [accounts]
+      operationId: accounts_token_obtain
+      summary: Exchange credentials for an access and refresh token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {$ref: '#/components/schemas/TokenRequest'}}
+      responses:
+        '200':
+          description: Token pair.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/TokenPair'}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /accounts/token/refresh:
+    post:
+      tags: [accounts]
+      operationId: accounts_token_refresh
+      summary: Exchange a refresh token for a new access token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh]
+              properties:
+                refresh: {type: string}
+      responses:
+        '200':
+          description: New access token.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [access]
+                properties:
+                  access: {type: string}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /accounts/me:
+    get:
+      tags: [accounts]
+      operationId: accounts_me_retrieve
+      summary: Current user
+      x-django-view: {name: MeView}
+      responses:
+        '200':
+          description: The authenticated user.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/User'}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /analytics/dashboard:
+    get:
+      tags: [analytics]
+      operationId: analytics_dashboard_retrieve
+      summary: Student dashboard
+      description: Courses with counts and mastery, cards due for review, recent study kits, pending AI jobs and recent activity.
+      x-django-view: {name: DashboardView}
+      responses:
+        '200':
+          description: Dashboard summary.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/DashboardSummary'}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /analytics/courses/{courseId}/progress:
+    parameters:
+      - {$ref: '#/components/parameters/CourseId'}
+    get:
+      tags: [analytics]
+      operationId: analytics_course_progress_retrieve
+      summary: Learning progress for a course
+      x-django-view: {name: CourseProgressView}
+      parameters:
+        - {name: days, in: query, schema: {type: integer, minimum: 1, maximum: 365, default: 30}}
+      responses:
+        '200':
+          description: Progress summary.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/CourseProgress'}}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /analytics/study-kits/{kitId}/progress:
+    parameters:
+      - {$ref: '#/components/parameters/StudyKitId'}
+    get:
+      tags: [analytics]
+      operationId: analytics_study_kit_progress_retrieve
+      summary: Learning progress for a study kit
+      x-django-view: {name: StudyKitProgressView}
+      responses:
+        '200':
+          description: Progress summary.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/StudyKitProgress'}}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /courses:
+    get:
+      tags: [courses]
+      operationId: courses_list
+      summary: List courses
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {name: is_archived, in: query, schema: {type: boolean}}
+        - {name: search, in: query, schema: {type: string}}
+        - {name: ordering, in: query, schema: {type: string, enum: [position, -position, title, -title, created_at, -created_at]}}
+      responses:
+        '200':
+          description: A page of courses.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/PaginatedCourseList'}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    post:
+      tags: [courses]
+      operationId: courses_create
+      summary: Create a course
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {$ref: '#/components/schemas/Course'}}
+      responses:
+        '201':
+          description: Course created.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/Course'}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /courses/reorder:
+    post:
+      tags: [courses]
+      operationId: courses_reorder
+      summary: Set the display order of courses
+      x-django-action: {viewset: CourseViewSet, detail: false, methods: [post], url_path: reorder}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ordered_ids]
+              properties:
+                ordered_ids:
+                  type: array
+                  items: {type: integer}
+                  description: Course ids in the desired order. Ids not listed keep their relative order after the listed ones.
+      responses:
+        '204': {description: Order saved.}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /courses/{courseId}:
+    parameters:
+      - {$ref: '#/components/parameters/CourseId'}
+    get:
+      tags: [courses]
+      operationId: courses_retrieve
+      summary: Retrieve a course
+      responses:
+        '200':
+          description: The course.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/Course'}}
+        '404': {$ref: '#/components/responses/NotFound'}
+    patch:
+      tags: [courses]
+      operationId: courses_partial_update
+      summary: Edit or archive a course
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {$ref: '#/components/schemas/Course'}}
+      responses:
+        '200':
+          description: The updated course.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/Course'}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    delete:
+      tags: [courses]
+      operationId: courses_destroy
+      summary: Delete a course and everything under it
+      responses:
+        '204': {description: Course deleted.}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /materials/documents:
+    get:
+      tags: [materials]
+      operationId: materials_documents_list
+      summary: List documents
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {$ref: '#/components/parameters/CourseFilter'}
+        - {name: status, in: query, schema: {$ref: '#/components/schemas/DocumentStatus'}}
+        - {name: file_type, in: query, schema: {$ref: '#/components/schemas/DocumentFileType'}}
+        - {name: search, in: query, schema: {type: string}}
+      responses:
+        '200':
+          description: A page of documents.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/PaginatedDocumentList'}}
+    post:
+      tags: [materials]
+      operationId: materials_documents_upload
+      summary: Upload a document into a course
+      description: |
+        Accepts PDF, PPTX, DOCX, TXT and MD files up to 50 MB. The server computes size, checksum and file type, rejects duplicates within the course (409) and, when `auto_process` is true, queues a `document_ingest` job.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data: {schema: {$ref: '#/components/schemas/DocumentUpload'}}
+      responses:
+        '201':
+          description: Document stored.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/Document'}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+
+  /materials/documents/{documentId}:
+    parameters:
+      - {$ref: '#/components/parameters/DocumentId'}
+    get:
+      tags: [materials]
+      operationId: materials_documents_retrieve
+      summary: Retrieve a document
+      responses:
+        '200':
+          description: The document.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/Document'}}
+        '404': {$ref: '#/components/responses/NotFound'}
+    patch:
+      tags: [materials]
+      operationId: materials_documents_partial_update
+      summary: Rename a document
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: {type: string, maxLength: 255}
+      responses:
+        '200':
+          description: The updated document.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/Document'}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    delete:
+      tags: [materials]
+      operationId: materials_documents_destroy
+      summary: Delete a document and its stored file
+      responses:
+        '204': {description: Document deleted.}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /materials/documents/{documentId}/download:
+    parameters:
+      - {$ref: '#/components/parameters/DocumentId'}
+    get:
+      tags: [materials]
+      operationId: materials_documents_download
+      summary: Download the original file
+      x-django-action: {viewset: DocumentViewSet, detail: true, methods: [get], url_path: download}
+      responses:
+        '200':
+          description: The original file.
+          content:
+            application/octet-stream: {schema: {type: string, format: binary}}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /materials/documents/{documentId}/reprocess:
+    parameters:
+      - {$ref: '#/components/parameters/DocumentId'}
+    post:
+      tags: [materials]
+      operationId: materials_documents_reprocess
+      summary: Re-run text extraction and chunking
+      description: Queues a `document_ingest` job and sets the document status to `queued`.
+      x-django-action: {viewset: DocumentViewSet, detail: true, methods: [post], url_path: reprocess}
+      responses:
+        '202':
+          description: Job queued.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/AIJob'}}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /materials/chunks/{chunkId}:
+    parameters:
+      - {$ref: '#/components/parameters/ChunkId'}
+    get:
+      tags: [materials]
+      operationId: materials_chunks_retrieve
+      summary: Retrieve a source passage
+      description: Used by the study UI to show where a flashcard, concept or question came from.
+      responses:
+        '200':
+          description: The source passage.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/DocumentChunk'}}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /materials/jobs:
+    get:
+      tags: [materials]
+      operationId: materials_jobs_list
+      summary: List AI jobs
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {$ref: '#/components/parameters/CourseFilter'}
+        - {name: job_type, in: query, schema: {$ref: '#/components/schemas/JobType'}}
+        - {name: status, in: query, schema: {$ref: '#/components/schemas/JobStatus'}}
+      responses:
+        '200':
+          description: A page of jobs.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/PaginatedAIJobList'}}
+
+  /materials/jobs/{jobId}:
+    parameters:
+      - {$ref: '#/components/parameters/JobId'}
+    get:
+      tags: [materials]
+      operationId: materials_jobs_retrieve
+      summary: Retrieve a job
+      responses:
+        '200':
+          description: The job.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/AIJob'}}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /materials/jobs/{jobId}/cancel:
+    parameters:
+      - {$ref: '#/components/parameters/JobId'}
+    post:
+      tags: [materials]
+      operationId: materials_jobs_cancel
+      summary: Cancel a queued or running job
+      x-django-action: {viewset: AIJobViewSet, detail: true, methods: [post], url_path: cancel}
+      responses:
+        '200':
+          description: The canceled job.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/AIJob'}}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /study-kits:
+    get:
+      tags: [study_kits]
+      operationId: study_kits_list
+      summary: List study kits
+      description: List items omit `key_concepts`, `summary` and `study_guide`.
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {$ref: '#/components/parameters/CourseFilter'}
+        - {name: status, in: query, schema: {$ref: '#/components/schemas/StudyKitStatus'}}
+      responses:
+        '200':
+          description: A page of study kits.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/PaginatedStudyKitList'}}
+    post:
+      tags: [study_kits]
+      operationId: study_kits_generate
+      summary: Generate a study kit from documents
+      description: Creates a `pending` study kit and queues a `study_kit_generation` job. All documents must belong to the course and be `processed`. The flashcards are created in the flashcards app by the same job.
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {$ref: '#/components/schemas/StudyKitCreate'}}
+      responses:
+        '202':
+          description: Generation queued.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/StudyKitAccepted'}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /study-kits/{kitId}:
+    parameters:
+      - {$ref: '#/components/parameters/StudyKitId'}
+    get:
+      tags: [study_kits]
+      operationId: study_kits_retrieve
+      summary: Retrieve a study kit with summary, study guide and key concepts
+      responses:
+        '200':
+          description: The study kit.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/StudyKit'}}
+        '404': {$ref: '#/components/responses/NotFound'}
+    patch:
+      tags: [study_kits]
+      operationId: study_kits_partial_update
+      summary: Edit the title, summary or study guide
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {$ref: '#/components/schemas/StudyKit'}}
+      responses:
+        '200':
+          description: The updated study kit.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/StudyKit'}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    delete:
+      tags: [study_kits]
+      operationId: study_kits_destroy
+      summary: Delete a study kit
+      responses:
+        '204': {description: Study kit deleted.}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /study-kits/{kitId}/regenerate:
+    parameters:
+      - {$ref: '#/components/parameters/StudyKitId'}
+    post:
+      tags: [study_kits]
+      operationId: study_kits_regenerate
+      summary: Regenerate parts of a study kit
+      description: Regenerated sections replace existing AI-generated content and point `generation_job` at the new job. Flashcards with review history are archived, not deleted.
+      x-django-action: {viewset: StudyKitViewSet, detail: true, methods: [post], url_path: regenerate}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sections:
+                  type: array
+                  items: {$ref: '#/components/schemas/StudyKitSection'}
+                  minItems: 1
+      responses:
+        '202':
+          description: Generation queued.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/StudyKitAccepted'}}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /flashcards:
+    get:
+      tags: [flashcards]
+      operationId: flashcards_list
+      summary: List flashcards
+      description: Filter by `study_kit` to get the cards of one kit. Per-student progress is not included here; use `GET /learning/card-progress`.
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {name: study_kit, in: query, schema: {type: integer}}
+        - {name: difficulty, in: query, schema: {$ref: '#/components/schemas/FlashcardDifficulty'}}
+        - {name: is_archived, in: query, schema: {type: boolean}}
+      responses:
+        '200':
+          description: A page of flashcards.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/PaginatedFlashcardList'}}
+    post:
+      tags: [flashcards]
+      operationId: flashcards_create
+      summary: Add a flashcard manually
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {$ref: '#/components/schemas/FlashcardCreate'}}
+      responses:
+        '201':
+          description: Flashcard created.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/Flashcard'}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /flashcards/{flashcardId}:
+    parameters:
+      - {$ref: '#/components/parameters/FlashcardId'}
+    get:
+      tags: [flashcards]
+      operationId: flashcards_retrieve
+      summary: Retrieve a flashcard
+      responses:
+        '200':
+          description: The flashcard.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/Flashcard'}}
+        '404': {$ref: '#/components/responses/NotFound'}
+    patch:
+      tags: [flashcards]
+      operationId: flashcards_partial_update
+      summary: Edit or archive a flashcard
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {$ref: '#/components/schemas/Flashcard'}}
+      responses:
+        '200':
+          description: The updated flashcard.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/Flashcard'}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    delete:
+      tags: [flashcards]
+      operationId: flashcards_destroy
+      summary: Delete a flashcard
+      responses:
+        '204': {description: Flashcard deleted.}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /learning/sessions:
+    get:
+      tags: [learning]
+      operationId: learning_sessions_list
+      summary: List the current user's study sessions
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {$ref: '#/components/parameters/CourseFilter'}
+        - {name: study_kit, in: query, schema: {type: integer}}
+        - {name: mode, in: query, schema: {$ref: '#/components/schemas/StudyMode'}}
+      responses:
+        '200':
+          description: A page of sessions, newest first.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/PaginatedStudySessionList'}}
+    post:
+      tags: [learning]
+      operationId: learning_sessions_create
+      summary: Start a study session
+      description: |
+        Builds an ordered queue of flashcard ids and stores it on the session.
+        - `standard`: struggling and overdue cards first, then new cards.
+        - `due_review`: only cards whose `next_review_at` has passed.
+        - `struggling`: only cards with the highest `priority_score`.
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {$ref: '#/components/schemas/StudySessionCreate'}}
+      responses:
+        '201':
+          description: Session started.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/StudySession'}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /learning/sessions/{sessionId}:
+    parameters:
+      - {$ref: '#/components/parameters/SessionId'}
+    get:
+      tags: [learning]
+      operationId: learning_sessions_retrieve
+      summary: Retrieve a study session
+      responses:
+        '200':
+          description: The session.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/StudySession'}}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /learning/sessions/{sessionId}/queue:
+    parameters:
+      - {$ref: '#/components/parameters/SessionId'}
+    get:
+      tags: [learning]
+      operationId: learning_sessions_queue
+      summary: Get the remaining cards in the session queue
+      description: Returns queue cards the user has not yet reviewed in this session, in order, each with the user's progress on it.
+      x-django-action: {viewset: StudySessionViewSet, detail: true, methods: [get], url_path: queue}
+      responses:
+        '200':
+          description: Remaining cards.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/StudyQueue'}}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /learning/sessions/{sessionId}/reviews:
+    parameters:
+      - {$ref: '#/components/parameters/SessionId'}
+    post:
+      tags: [learning]
+      operationId: learning_sessions_review
+      summary: Submit a card review with a confidence rating
+      description: |
+        Records a `CardReview`, updates the user's `CardProgress` for the card (counters, streak, average confidence, ease factor, interval, `next_review_at`) and recomputes `priority_score`.
+        Priority rises with the incorrect ratio, low confidence and how overdue the card is, and falls with the correct streak.
+        A correct answer given with low confidence (1-2) shortens the next interval; an incorrect answer resets the streak and interval.
+      x-django-action: {viewset: StudySessionViewSet, detail: true, methods: [post], url_path: reviews}
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {$ref: '#/components/schemas/ReviewCreate'}}
+      responses:
+        '201':
+          description: Review recorded.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/ReviewResult'}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /learning/sessions/{sessionId}/complete:
+    parameters:
+      - {$ref: '#/components/parameters/SessionId'}
+    post:
+      tags: [learning]
+      operationId: learning_sessions_complete
+      summary: End a study session
+      x-django-action: {viewset: StudySessionViewSet, detail: true, methods: [post], url_path: complete}
+      responses:
+        '200':
+          description: The completed session with final counts.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/StudySession'}}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /learning/card-progress:
+    get:
+      tags: [learning]
+      operationId: learning_card_progress_list
+      summary: The current user's progress on flashcards
+      description: Only cards the user has reviewed at least once have a row.
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {name: flashcard, in: query, schema: {type: integer}}
+        - {name: study_kit, in: query, schema: {type: integer}}
+        - {$ref: '#/components/parameters/CourseFilter'}
+      responses:
+        '200':
+          description: A page of progress rows.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/PaginatedCardProgressList'}}
+
+  /learning/struggling-cards:
+    get:
+      tags: [learning]
+      operationId: learning_struggling_cards_list
+      summary: Cards the student struggles with most
+      description: Ordered by `priority_score` descending. Only cards reviewed at least once are included.
+      x-django-view: {name: StrugglingCardsView}
+      parameters:
+        - {$ref: '#/components/parameters/CourseFilter'}
+        - {name: study_kit, in: query, schema: {type: integer}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 20}}
+      responses:
+        '200':
+          description: Struggling cards.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/StrugglingCard'}
+
+  /practice-tests:
+    get:
+      tags: [practice_tests]
+      operationId: practice_tests_list
+      summary: List practice tests
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {$ref: '#/components/parameters/CourseFilter'}
+        - {name: status, in: query, schema: {$ref: '#/components/schemas/PracticeTestStatus'}}
+        - {name: difficulty, in: query, schema: {$ref: '#/components/schemas/TestDifficulty'}}
+      responses:
+        '200':
+          description: A page of practice tests.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/PaginatedPracticeTestList'}}
+    post:
+      tags: [practice_tests]
+      operationId: practice_tests_generate
+      summary: Generate a practice test
+      description: Creates a `pending` test and queues a `test_generation` job. Supply `study_kit_id`, `document_ids`, or both; all must belong to the course.
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {$ref: '#/components/schemas/PracticeTestCreate'}}
+      responses:
+        '202':
+          description: Generation queued.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/PracticeTestAccepted'}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /practice-tests/{testId}:
+    parameters:
+      - {$ref: '#/components/parameters/TestId'}
+    get:
+      tags: [practice_tests]
+      operationId: practice_tests_retrieve
+      summary: Retrieve a practice test
+      responses:
+        '200':
+          description: The test.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/PracticeTest'}}
+        '404': {$ref: '#/components/responses/NotFound'}
+    patch:
+      tags: [practice_tests]
+      operationId: practice_tests_partial_update
+      summary: Edit the title or time limit
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {$ref: '#/components/schemas/PracticeTest'}}
+      responses:
+        '200':
+          description: The updated test.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/PracticeTest'}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    delete:
+      tags: [practice_tests]
+      operationId: practice_tests_destroy
+      summary: Delete a practice test and its attempts
+      responses:
+        '204': {description: Test deleted.}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /practice-tests/{testId}/questions:
+    parameters:
+      - {$ref: '#/components/parameters/TestId'}
+    get:
+      tags: [practice_tests]
+      operationId: practice_tests_questions
+      summary: List questions for taking the test
+      description: Correct answers, reference answers and explanations are never included here. They are only returned by the attempt results endpoint after submission.
+      x-django-action: {viewset: PracticeTestViewSet, detail: true, methods: [get], url_path: questions}
+      responses:
+        '200':
+          description: Questions in order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/TestQuestionPublic'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /practice-tests/{testId}/attempts:
+    parameters:
+      - {$ref: '#/components/parameters/TestId'}
+    get:
+      tags: [practice_tests]
+      operationId: practice_tests_attempts_list
+      summary: List the current user's attempts at a test
+      x-django-action: {viewset: PracticeTestViewSet, detail: true, methods: [get, post], url_path: attempts}
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+      responses:
+        '200':
+          description: A page of attempts, newest first.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/PaginatedTestAttemptList'}}
+        '404': {$ref: '#/components/responses/NotFound'}
+    post:
+      tags: [practice_tests]
+      operationId: practice_tests_attempts_create
+      summary: Start an attempt
+      description: Requires the test to be `ready`. Returns the existing in-progress attempt if there is one.
+      x-django-action: {viewset: PracticeTestViewSet, detail: true, methods: [get, post], url_path: attempts}
+      responses:
+        '201':
+          description: Attempt started.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/TestAttempt'}}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /practice-tests/attempts/{attemptId}:
+    parameters:
+      - {$ref: '#/components/parameters/AttemptId'}
+    get:
+      tags: [practice_tests]
+      operationId: practice_tests_attempts_retrieve
+      summary: Retrieve an attempt
+      responses:
+        '200':
+          description: The attempt.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/TestAttempt'}}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /practice-tests/attempts/{attemptId}/answers/{questionId}:
+    parameters:
+      - {$ref: '#/components/parameters/AttemptId'}
+      - {$ref: '#/components/parameters/QuestionId'}
+    put:
+      tags: [practice_tests]
+      operationId: practice_tests_attempts_answer_save
+      summary: Save or replace the answer to one question
+      description: Idempotent autosave. Only allowed while the attempt is `in_progress`.
+      x-django-action: {viewset: TestAttemptViewSet, detail: true, methods: [put], url_path: 'answers/(?P<question_id>[0-9]+)'}
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {$ref: '#/components/schemas/AnswerInput'}}
+      responses:
+        '200':
+          description: The saved answer.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/SavedAnswer'}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /practice-tests/attempts/{attemptId}/submit:
+    parameters:
+      - {$ref: '#/components/parameters/AttemptId'}
+    post:
+      tags: [practice_tests]
+      operationId: practice_tests_attempts_submit
+      summary: Submit an attempt for grading
+      description: |
+        Multiple-choice answers are graded immediately by comparing `selected_choice_id` with `correct_choice_id` (`graded_by=auto`).
+        Short answers are graded by the AI against `reference_answer` and `grading_rubric` (`graded_by=ai`) through an `attempt_grading` job, producing `points_awarded` and `feedback`.
+        If short-answer grading is still running the attempt is returned with status `grading` and its `grading_job`; otherwise status is `graded` with score fields filled.
+      x-django-action: {viewset: TestAttemptViewSet, detail: true, methods: [post], url_path: submit}
+      responses:
+        '200':
+          description: The submitted attempt.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/TestAttempt'}}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /practice-tests/attempts/{attemptId}/results:
+    parameters:
+      - {$ref: '#/components/parameters/AttemptId'}
+    get:
+      tags: [practice_tests]
+      operationId: practice_tests_attempts_results
+      summary: Per-question results with correct answers and explanations
+      description: Available once the attempt is `submitted`, `grading` or `graded`. Not-yet-graded answers have null `is_correct`.
+      x-django-action: {viewset: TestAttemptViewSet, detail: true, methods: [get], url_path: results}
+      responses:
+        '200':
+          description: Graded results.
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/AttemptResults'}}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    Page: {name: page, in: query, schema: {type: integer, minimum: 1, default: 1}}
+    PageSize: {name: page_size, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 20}}
+    CourseFilter: {name: course, in: query, schema: {type: integer}}
+    CourseId: {name: courseId, in: path, required: true, schema: {type: integer}}
+    DocumentId: {name: documentId, in: path, required: true, schema: {type: integer}}
+    ChunkId: {name: chunkId, in: path, required: true, schema: {type: integer}}
+    JobId: {name: jobId, in: path, required: true, schema: {type: integer}}
+    StudyKitId: {name: kitId, in: path, required: true, schema: {type: integer}}
+    FlashcardId: {name: flashcardId, in: path, required: true, schema: {type: integer}}
+    SessionId: {name: sessionId, in: path, required: true, schema: {type: integer}}
+    TestId: {name: testId, in: path, required: true, schema: {type: integer}}
+    AttemptId: {name: attemptId, in: path, required: true, schema: {type: integer}}
+    QuestionId: {name: questionId, in: path, required: true, schema: {type: integer}}
+
+  responses:
+    BadRequest:
+      description: Validation failed. Keys are field names; values are lists of messages.
+      content:
+        application/json: {schema: {$ref: '#/components/schemas/ValidationError'}}
+    Unauthorized:
+      description: Missing or invalid credentials.
+      content:
+        application/json: {schema: {$ref: '#/components/schemas/Error'}}
+    NotFound:
+      description: The object does not exist or belongs to another user.
+      content:
+        application/json: {schema: {$ref: '#/components/schemas/Error'}}
+    Conflict:
+      description: The request conflicts with the current state of the object.
+      content:
+        application/json: {schema: {$ref: '#/components/schemas/Error'}}
+    PayloadTooLarge:
+      description: The file exceeds the upload limit.
+      content:
+        application/json: {schema: {$ref: '#/components/schemas/Error'}}
+    UnsupportedMediaType:
+      description: The file type is not supported.
+      content:
+        application/json: {schema: {$ref: '#/components/schemas/Error'}}
+
+  schemas:
+    Error:
+      type: object
+      required: [detail]
+      properties:
+        detail: {type: string}
+        code: {type: string}
+
+    ValidationError:
+      type: object
+      additionalProperties:
+        type: array
+        items: {type: string}
+
+    PageEnvelope:
+      type: object
+      required: [count, next, previous]
+      properties:
+        count: {type: integer}
+        next: {type: [string, 'null'], format: uri}
+        previous: {type: [string, 'null'], format: uri}
+
+    PaginatedCourseList:
+      allOf:
+        - {$ref: '#/components/schemas/PageEnvelope'}
+        - type: object
+          required: [results]
+          properties:
+            results: {type: array, items: {$ref: '#/components/schemas/Course'}}
+    PaginatedDocumentList:
+      allOf:
+        - {$ref: '#/components/schemas/PageEnvelope'}
+        - type: object
+          required: [results]
+          properties:
+            results: {type: array, items: {$ref: '#/components/schemas/Document'}}
+    PaginatedAIJobList:
+      allOf:
+        - {$ref: '#/components/schemas/PageEnvelope'}
+        - type: object
+          required: [results]
+          properties:
+            results: {type: array, items: {$ref: '#/components/schemas/AIJob'}}
+    PaginatedStudyKitList:
+      allOf:
+        - {$ref: '#/components/schemas/PageEnvelope'}
+        - type: object
+          required: [results]
+          properties:
+            results: {type: array, items: {$ref: '#/components/schemas/StudyKit'}}
+    PaginatedFlashcardList:
+      allOf:
+        - {$ref: '#/components/schemas/PageEnvelope'}
+        - type: object
+          required: [results]
+          properties:
+            results: {type: array, items: {$ref: '#/components/schemas/Flashcard'}}
+    PaginatedStudySessionList:
+      allOf:
+        - {$ref: '#/components/schemas/PageEnvelope'}
+        - type: object
+          required: [results]
+          properties:
+            results: {type: array, items: {$ref: '#/components/schemas/StudySession'}}
+    PaginatedCardProgressList:
+      allOf:
+        - {$ref: '#/components/schemas/PageEnvelope'}
+        - type: object
+          required: [results]
+          properties:
+            results: {type: array, items: {$ref: '#/components/schemas/CardProgress'}}
+    PaginatedPracticeTestList:
+      allOf:
+        - {$ref: '#/components/schemas/PageEnvelope'}
+        - type: object
+          required: [results]
+          properties:
+            results: {type: array, items: {$ref: '#/components/schemas/PracticeTest'}}
+    PaginatedTestAttemptList:
+      allOf:
+        - {$ref: '#/components/schemas/PageEnvelope'}
+        - type: object
+          required: [results]
+          properties:
+            results: {type: array, items: {$ref: '#/components/schemas/TestAttempt'}}
+
+    DocumentFileType:
+      type: string
+      enum: [pdf, pptx, docx, txt, md]
+      x-django-enum: {name: DocumentFileType, app: materials}
+    DocumentStatus:
+      type: string
+      enum: [uploaded, queued, processing, processed, failed]
+      x-django-enum: {name: DocumentStatus, app: materials}
+    JobType:
+      type: string
+      enum: [document_ingest, study_kit_generation, test_generation, attempt_grading]
+      x-django-enum: {name: JobType, app: materials}
+    JobStatus:
+      type: string
+      enum: [queued, running, succeeded, failed, canceled]
+      x-django-enum: {name: JobStatus, app: materials}
+    StudyKitStatus:
+      type: string
+      enum: [pending, generating, ready, failed]
+      x-django-enum: {name: StudyKitStatus, app: study_kits}
+    FlashcardDifficulty:
+      type: string
+      enum: [easy, medium, hard]
+      x-django-enum: {name: FlashcardDifficulty, app: flashcards}
+    StudyMode:
+      type: string
+      enum: [standard, due_review, struggling]
+      x-django-enum: {name: StudyMode, app: learning}
+    PracticeTestStatus:
+      type: string
+      enum: [pending, generating, ready, failed]
+      x-django-enum: {name: PracticeTestStatus, app: practice_tests}
+    TestDifficulty:
+      type: string
+      enum: [easy, medium, hard]
+      x-django-enum: {name: TestDifficulty, app: practice_tests}
+    QuestionType:
+      type: string
+      enum: [multiple_choice, short_answer]
+      x-django-enum: {name: QuestionType, app: practice_tests}
+    AttemptStatus:
+      type: string
+      enum: [in_progress, submitted, grading, graded]
+      x-django-enum: {name: AttemptStatus, app: practice_tests}
+    GradedBy:
+      type: string
+      enum: [auto, ai]
+      x-django-enum: {name: GradedBy, app: practice_tests}
+    StudyKitSection:
+      type: string
+      enum: [summary, key_concepts, study_guide, flashcards]
+
+    User:
+      type: object
+      required: [id, username, email]
+      x-django-model:
+        app: accounts
+        base: {module: django.contrib.auth.models, name: AbstractUser}
+        serializer: false
+      properties:
+        id: {type: integer, readOnly: true}
+        username: {type: string}
+        email:
+          type: string
+          format: email
+          x-django-field: {type: EmailField, unique: true}
+        first_name: {type: string}
+        last_name: {type: string}
+
+    RegisterRequest:
+      type: object
+      required: [username, email, password]
+      properties:
+        username: {type: string, maxLength: 150}
+        email: {type: string, format: email}
+        password: {type: string, minLength: 8, writeOnly: true}
+        first_name: {type: string, maxLength: 150}
+        last_name: {type: string, maxLength: 150}
+
+    TokenRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: {type: string}
+        password: {type: string, writeOnly: true}
+
+    TokenPair:
+      type: object
+      required: [access, refresh]
+      properties:
+        access: {type: string}
+        refresh: {type: string}
+
+    Course:
+      type: object
+      required: [title]
+      x-django-model:
+        app: courses
+        ordering: [position, title]
+        timestamps: true
+        str_field: title
+        indexes:
+          - {name: crs_owner_arch_idx, fields: [owner, is_archived]}
+        constraints:
+          - {type: unique, name: crs_owner_code_uniq, fields: [owner, code], condition: "~models.Q(code='')"}
+      properties:
+        id: {type: integer, readOnly: true}
+        owner:
+          type: integer
+          readOnly: true
+          x-django-field: {type: ForeignKey, to: AUTH_USER_MODEL, on_delete: CASCADE, related_name: courses}
+        title:
+          type: string
+          maxLength: 200
+          x-django-field: {type: CharField, max_length: 200}
+        code:
+          type: string
+          maxLength: 32
+          default: ''
+          x-django-field: {type: CharField, max_length: 32, blank: true, default: ''}
+        description:
+          type: string
+          default: ''
+          x-django-field: {type: TextField, blank: true, default: ''}
+        term:
+          type: string
+          maxLength: 64
+          default: ''
+          x-django-field: {type: CharField, max_length: 64, blank: true, default: ''}
+        color:
+          type: string
+          maxLength: 7
+          pattern: '^#[0-9A-Fa-f]{6}$'
+          default: '#6366F1'
+          x-django-field: {type: CharField, max_length: 7, default: '#6366F1'}
+        position:
+          type: integer
+          minimum: 0
+          default: 0
+          x-django-field: {type: PositiveIntegerField, default: 0}
+        is_archived:
+          type: boolean
+          default: false
+          x-django-field: {type: BooleanField, default: false}
+        created_at: {type: string, format: date-time, readOnly: true}
+        updated_at: {type: string, format: date-time, readOnly: true}
+        document_count: {type: integer, readOnly: true}
+        study_kit_count: {type: integer, readOnly: true}
+        flashcard_count: {type: integer, readOnly: true}
+        mastery_percent: {type: number, readOnly: true, minimum: 0, maximum: 100}
+
+    Document:
+      type: object
+      x-django-model:
+        app: materials
+        ordering: [-created_at]
+        timestamps: true
+        str_field: title
+        indexes:
+          - {name: mat_doc_course_status_idx, fields: [course, status]}
+        constraints:
+          - {type: unique, name: mat_doc_course_sha_uniq, fields: [course, sha256], condition: "~models.Q(sha256='')"}
+      properties:
+        id: {type: integer, readOnly: true}
+        course:
+          type: integer
+          readOnly: true
+          x-django-field: {type: ForeignKey, to: Course, on_delete: CASCADE, related_name: documents}
+        title:
+          type: string
+          maxLength: 255
+          x-django-field: {type: CharField, max_length: 255}
+        original_filename:
+          type: string
+          maxLength: 255
+          readOnly: true
+          x-django-field: {type: CharField, max_length: 255}
+        file:
+          type: string
+          format: uri
+          readOnly: true
+          x-django-field: {type: FileField, upload_to: 'materials/%Y/%m/', max_length: 500}
+        file_type:
+          $ref: '#/components/schemas/DocumentFileType'
+          readOnly: true
+          x-django-field: {type: CharField, max_length: 8}
+        size_bytes:
+          type: integer
+          readOnly: true
+          minimum: 0
+          x-django-field: {type: PositiveBigIntegerField}
+        sha256:
+          type: string
+          maxLength: 64
+          readOnly: true
+          x-django-field: {type: CharField, max_length: 64, blank: true, default: ''}
+        page_count:
+          type: [integer, 'null']
+          readOnly: true
+          minimum: 0
+          x-django-field: {type: PositiveIntegerField, "null": true, blank: true}
+        status:
+          $ref: '#/components/schemas/DocumentStatus'
+          readOnly: true
+          x-django-field: {type: CharField, max_length: 16, default: uploaded, db_index: true}
+        error_message:
+          type: string
+          readOnly: true
+          x-django-field: {type: TextField, blank: true, default: ''}
+        processed_at:
+          type: [string, 'null']
+          format: date-time
+          readOnly: true
+          x-django-field: {type: DateTimeField, "null": true, blank: true}
+        created_at: {type: string, format: date-time, readOnly: true}
+        updated_at: {type: string, format: date-time, readOnly: true}
+
+    DocumentUpload:
+      type: object
+      required: [course_id, file]
+      properties:
+        course_id: {type: integer}
+        file: {type: string, format: binary}
+        title:
+          type: string
+          maxLength: 255
+          description: Defaults to the file name without extension.
+        auto_process:
+          type: boolean
+          default: true
+          description: Queue the AI ingest job immediately after upload.
+
+    DocumentChunk:
+      type: object
+      x-django-model:
+        app: materials
+        ordering: [document, chunk_index]
+        constraints:
+          - {type: unique, name: mat_chunk_doc_index_uniq, fields: [document, chunk_index]}
+      properties:
+        id: {type: integer, readOnly: true}
+        document:
+          type: integer
+          readOnly: true
+          x-django-field: {type: ForeignKey, to: Document, on_delete: CASCADE, related_name: chunks}
+        chunk_index:
+          type: integer
+          minimum: 0
+          x-django-field: {type: PositiveIntegerField}
+        page_number:
+          type: [integer, 'null']
+          minimum: 1
+          x-django-field: {type: PositiveIntegerField, "null": true, blank: true}
+        text:
+          type: string
+          x-django-field: {type: TextField}
+        token_count:
+          type: integer
+          minimum: 0
+          default: 0
+          x-django-field: {type: PositiveIntegerField, default: 0}
+        document_title: {type: string, readOnly: true}
+
+    AIJob:
+      type: object
+      description: One unit of background AI work. The object a job produces points back at the job (`StudyKit.generation_job`, `PracticeTest.generation_job`, `TestAttempt.grading_job`), never the other way round.
+      x-django-model:
+        app: materials
+        ordering: [-created_at]
+        timestamps: true
+        indexes:
+          - {name: mat_job_status_created_idx, fields: [status, created_at]}
+          - {name: mat_job_course_status_idx, fields: [course, status]}
+        constraints:
+          - {type: check, name: mat_job_progress_range, condition: "models.Q(progress__gte=0, progress__lte=100)"}
+      properties:
+        id: {type: integer, readOnly: true}
+        course:
+          type: integer
+          readOnly: true
+          x-django-field: {type: ForeignKey, to: Course, on_delete: CASCADE, related_name: ai_jobs}
+        job_type:
+          $ref: '#/components/schemas/JobType'
+          readOnly: true
+          x-django-field: {type: CharField, max_length: 32}
+        status:
+          $ref: '#/components/schemas/JobStatus'
+          readOnly: true
+          x-django-field: {type: CharField, max_length: 16, default: queued}
+        progress:
+          type: integer
+          readOnly: true
+          minimum: 0
+          maximum: 100
+          x-django-field: {type: PositiveSmallIntegerField, default: 0}
+        document:
+          type: [integer, 'null']
+          readOnly: true
+          description: Set for `document_ingest` jobs.
+          x-django-field: {type: ForeignKey, to: Document, on_delete: CASCADE, "null": true, blank: true, related_name: jobs}
+        target_id:
+          type: [integer, 'null']
+          readOnly: true
+          description: Id of the object the job produces or works on, resolved from the reverse relations. `document_ingest` returns the document id, `study_kit_generation` the study kit id, `test_generation` the practice test id and `attempt_grading` the attempt id.
+        task_id:
+          type: string
+          maxLength: 255
+          readOnly: true
+          x-django-field: {type: CharField, max_length: 255, blank: true, default: ''}
+        model_name:
+          type: string
+          maxLength: 100
+          readOnly: true
+          x-django-field: {type: CharField, max_length: 100, blank: true, default: ''}
+        error_message:
+          type: string
+          readOnly: true
+          x-django-field: {type: TextField, blank: true, default: ''}
+        started_at:
+          type: [string, 'null']
+          format: date-time
+          readOnly: true
+          x-django-field: {type: DateTimeField, "null": true, blank: true}
+        finished_at:
+          type: [string, 'null']
+          format: date-time
+          readOnly: true
+          x-django-field: {type: DateTimeField, "null": true, blank: true}
+        created_at: {type: string, format: date-time, readOnly: true}
+        updated_at: {type: string, format: date-time, readOnly: true}
+
+    StudyKit:
+      type: object
+      x-django-model:
+        app: study_kits
+        ordering: [-created_at]
+        timestamps: true
+        str_field: title
+        indexes:
+          - {name: kit_course_status_idx, fields: [course, status]}
+      properties:
+        id: {type: integer, readOnly: true}
+        course:
+          type: integer
+          readOnly: true
+          x-django-field: {type: ForeignKey, to: Course, on_delete: CASCADE, related_name: study_kits}
+        title:
+          type: string
+          maxLength: 200
+          x-django-field: {type: CharField, max_length: 200}
+        status:
+          $ref: '#/components/schemas/StudyKitStatus'
+          readOnly: true
+          x-django-field: {type: CharField, max_length: 16, default: pending, db_index: true}
+        summary:
+          type: string
+          x-django-field: {type: TextField, blank: true, default: ''}
+        study_guide:
+          type: string
+          description: Markdown.
+          x-django-field: {type: TextField, blank: true, default: ''}
+        documents:
+          type: array
+          readOnly: true
+          items: {type: integer}
+          x-django-field: {type: ManyToManyField, to: Document, related_name: study_kits, blank: true}
+        generation_job:
+          type: [integer, 'null']
+          readOnly: true
+          description: The most recent generation job.
+          x-django-field: {type: ForeignKey, to: AIJob, on_delete: SET_NULL, "null": true, blank: true, related_name: study_kits}
+        generation_options:
+          type: object
+          readOnly: true
+          additionalProperties: true
+          x-django-field: {type: JSONField, default_factory: dict, blank: true}
+        model_name:
+          type: string
+          maxLength: 100
+          readOnly: true
+          x-django-field: {type: CharField, max_length: 100, blank: true, default: ''}
+        created_at: {type: string, format: date-time, readOnly: true}
+        updated_at: {type: string, format: date-time, readOnly: true}
+        flashcard_count: {type: integer, readOnly: true}
+        key_concepts:
+          type: array
+          readOnly: true
+          items: {$ref: '#/components/schemas/KeyConcept'}
+
+    StudyKitCreate:
+      type: object
+      required: [course_id, title, document_ids]
+      properties:
+        course_id: {type: integer}
+        title: {type: string, maxLength: 200}
+        document_ids:
+          type: array
+          minItems: 1
+          items: {type: integer}
+        include:
+          type: array
+          uniqueItems: true
+          items: {$ref: '#/components/schemas/StudyKitSection'}
+          default: [summary, key_concepts, study_guide, flashcards]
+        flashcard_count:
+          type: integer
+          minimum: 5
+          maximum: 200
+          default: 30
+        difficulty_mix:
+          type: object
+          description: Target share of generated flashcards per difficulty. Values must sum to 1.
+          properties:
+            easy: {type: number, minimum: 0, maximum: 1}
+            medium: {type: number, minimum: 0, maximum: 1}
+            hard: {type: number, minimum: 0, maximum: 1}
+        language:
+          type: string
+          default: en
+          description: IETF language tag for generated content.
+
+    StudyKitAccepted:
+      type: object
+      required: [study_kit, job]
+      properties:
+        study_kit: {$ref: '#/components/schemas/StudyKit'}
+        job: {$ref: '#/components/schemas/AIJob'}
+
+    KeyConcept:
+      type: object
+      x-django-model:
+        app: study_kits
+        ordering: [study_kit, position]
+        str_field: term
+      properties:
+        id: {type: integer, readOnly: true}
+        study_kit:
+          type: integer
+          readOnly: true
+          x-django-field: {type: ForeignKey, to: StudyKit, on_delete: CASCADE, related_name: key_concepts}
+        term:
+          type: string
+          maxLength: 255
+          x-django-field: {type: CharField, max_length: 255}
+        definition:
+          type: string
+          x-django-field: {type: TextField}
+        importance:
+          type: integer
+          minimum: 1
+          maximum: 5
+          default: 3
+          x-django-field: {type: PositiveSmallIntegerField, default: 3, min_value: 1, max_value: 5}
+        position:
+          type: integer
+          minimum: 0
+          default: 0
+          x-django-field: {type: PositiveIntegerField, default: 0}
+        source_chunk:
+          type: [integer, 'null']
+          readOnly: true
+          x-django-field: {type: ForeignKey, to: DocumentChunk, on_delete: SET_NULL, "null": true, blank: true, related_name: key_concepts}
+
+    Flashcard:
+      type: object
+      x-django-model:
+        app: flashcards
+        ordering: [study_kit, position]
+        timestamps: true
+        indexes:
+          - {name: fc_kit_arch_idx, fields: [study_kit, is_archived]}
+      properties:
+        id: {type: integer, readOnly: true}
+        study_kit:
+          type: integer
+          readOnly: true
+          x-django-field: {type: ForeignKey, to: StudyKit, on_delete: CASCADE, related_name: flashcards}
+        front:
+          type: string
+          x-django-field: {type: TextField}
+        back:
+          type: string
+          x-django-field: {type: TextField}
+        hint:
+          type: string
+          default: ''
+          x-django-field: {type: TextField, blank: true, default: ''}
+        difficulty:
+          $ref: '#/components/schemas/FlashcardDifficulty'
+          default: medium
+          x-django-field: {type: CharField, max_length: 8, default: medium}
+        position:
+          type: integer
+          minimum: 0
+          default: 0
+          x-django-field: {type: PositiveIntegerField, default: 0}
+        is_ai_generated:
+          type: boolean
+          readOnly: true
+          x-django-field: {type: BooleanField, default: false}
+        is_archived:
+          type: boolean
+          default: false
+          x-django-field: {type: BooleanField, default: false}
+        source_chunk:
+          type: [integer, 'null']
+          readOnly: true
+          x-django-field: {type: ForeignKey, to: DocumentChunk, on_delete: SET_NULL, "null": true, blank: true, related_name: flashcards}
+        created_at: {type: string, format: date-time, readOnly: true}
+        updated_at: {type: string, format: date-time, readOnly: true}
+
+    FlashcardCreate:
+      type: object
+      required: [study_kit_id, front, back]
+      properties:
+        study_kit_id: {type: integer}
+        front: {type: string}
+        back: {type: string}
+        hint: {type: string, default: ''}
+        difficulty:
+          $ref: '#/components/schemas/FlashcardDifficulty'
+          default: medium
+        position: {type: integer, minimum: 0}
+
+    CardProgress:
+      type: object
+      x-django-model:
+        app: learning
+        ordering: [-priority_score]
+        timestamps: true
+        indexes:
+          - {name: lrn_cardprog_user_prio_idx, fields: [user, -priority_score]}
+          - {name: lrn_cardprog_user_due_idx, fields: [user, next_review_at]}
+        constraints:
+          - {type: unique, name: lrn_cardprog_user_card_uniq, fields: [user, flashcard]}
+      properties:
+        id: {type: integer, readOnly: true}
+        user:
+          type: integer
+          readOnly: true
+          x-django-field: {type: ForeignKey, to: AUTH_USER_MODEL, on_delete: CASCADE, related_name: card_progress}
+        flashcard:
+          type: integer
+          readOnly: true
+          x-django-field: {type: ForeignKey, to: Flashcard, on_delete: CASCADE, related_name: progress}
+        times_seen:
+          type: integer
+          readOnly: true
+          x-django-field: {type: PositiveIntegerField, default: 0}
+        times_correct:
+          type: integer
+          readOnly: true
+          x-django-field: {type: PositiveIntegerField, default: 0}
+        times_incorrect:
+          type: integer
+          readOnly: true
+          x-django-field: {type: PositiveIntegerField, default: 0}
+        current_streak:
+          type: integer
+          readOnly: true
+          x-django-field: {type: PositiveIntegerField, default: 0}
+        avg_confidence:
+          type: number
+          readOnly: true
+          minimum: 0
+          maximum: 5
+          x-django-field: {type: FloatField, default: 0}
+        last_confidence:
+          type: [integer, 'null']
+          readOnly: true
+          minimum: 1
+          maximum: 5
+          x-django-field: {type: PositiveSmallIntegerField, "null": true, blank: true}
+        ease_factor:
+          type: number
+          readOnly: true
+          x-django-field: {type: FloatField, default: 2.5}
+        interval_days:
+          type: integer
+          readOnly: true
+          x-django-field: {type: PositiveIntegerField, default: 0}
+        next_review_at:
+          type: [string, 'null']
+          format: date-time
+          readOnly: true
+          x-django-field: {type: DateTimeField, "null": true, blank: true}
+        last_reviewed_at:
+          type: [string, 'null']
+          format: date-time
+          readOnly: true
+          x-django-field: {type: DateTimeField, "null": true, blank: true}
+        priority_score:
+          type: number
+          readOnly: true
+          description: Higher means the student struggles more with this card. Recomputed on every review.
+          x-django-field: {type: FloatField, default: 0}
+        is_mastered:
+          type: boolean
+          readOnly: true
+          x-django-field: {type: BooleanField, default: false}
+        created_at: {type: string, format: date-time, readOnly: true}
+        updated_at: {type: string, format: date-time, readOnly: true}
+
+    CardProgressSummary:
+      type: object
+      required: [times_seen, times_correct, times_incorrect, current_streak, priority_score, is_mastered]
+      properties:
+        times_seen: {type: integer}
+        times_correct: {type: integer}
+        times_incorrect: {type: integer}
+        current_streak: {type: integer}
+        avg_confidence: {type: number, minimum: 0, maximum: 5}
+        last_confidence: {type: [integer, 'null'], minimum: 1, maximum: 5}
+        next_review_at: {type: [string, 'null'], format: date-time}
+        last_reviewed_at: {type: [string, 'null'], format: date-time}
+        priority_score: {type: number}
+        is_mastered: {type: boolean}
+
+    StudySession:
+      type: object
+      x-django-model:
+        app: learning
+        ordering: [-started_at]
+        indexes:
+          - {name: lrn_session_user_start_idx, fields: [user, -started_at]}
+      properties:
+        id: {type: integer, readOnly: true}
+        user:
+          type: integer
+          readOnly: true
+          x-django-field: {type: ForeignKey, to: AUTH_USER_MODEL, on_delete: CASCADE, related_name: study_sessions}
+        course:
+          type: integer
+          readOnly: true
+          x-django-field: {type: ForeignKey, to: Course, on_delete: CASCADE, related_name: study_sessions}
+        study_kit:
+          type: [integer, 'null']
+          readOnly: true
+          x-django-field: {type: ForeignKey, to: StudyKit, on_delete: SET_NULL, "null": true, blank: true, related_name: study_sessions}
+        mode:
+          $ref: '#/components/schemas/StudyMode'
+          readOnly: true
+          x-django-field: {type: CharField, max_length: 16, default: standard}
+        queue:
+          type: array
+          readOnly: true
+          items: {type: integer}
+          description: Ordered flashcard ids selected when the session started.
+          x-django-field: {type: JSONField, default_factory: list, blank: true}
+        started_at:
+          type: string
+          format: date-time
+          readOnly: true
+          x-django-field: {type: DateTimeField, auto_now_add: true}
+        ended_at:
+          type: [string, 'null']
+          format: date-time
+          readOnly: true
+          x-django-field: {type: DateTimeField, "null": true, blank: true}
+        cards_reviewed:
+          type: integer
+          readOnly: true
+          x-django-field: {type: PositiveIntegerField, default: 0}
+        cards_correct:
+          type: integer
+          readOnly: true
+          x-django-field: {type: PositiveIntegerField, default: 0}
+        queue_size: {type: integer, readOnly: true}
+
+    StudySessionCreate:
+      type: object
+      required: [course_id]
+      properties:
+        course_id: {type: integer}
+        study_kit_id:
+          type: [integer, 'null']
+          description: Restrict the session to one study kit; null studies all kits in the course.
+        mode:
+          $ref: '#/components/schemas/StudyMode'
+          default: standard
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 20
+        difficulty:
+          type: array
+          uniqueItems: true
+          items: {$ref: '#/components/schemas/FlashcardDifficulty'}
+
+    StudyQueue:
+      type: object
+      required: [session_id, cards]
+      properties:
+        session_id: {type: integer}
+        cards:
+          type: array
+          items: {$ref: '#/components/schemas/QueueCard'}
+
+    QueueCard:
+      type: object
+      required: [flashcard, reason]
+      properties:
+        flashcard: {$ref: '#/components/schemas/Flashcard'}
+        progress:
+          oneOf:
+            - {$ref: '#/components/schemas/CardProgressSummary'}
+            - {type: 'null'}
+          description: Null for cards the user has never reviewed.
+        reason:
+          type: string
+          enum: [struggling, due, new]
+
+    ReviewCreate:
+      type: object
+      required: [flashcard_id, confidence, is_correct]
+      properties:
+        flashcard_id: {type: integer}
+        confidence:
+          type: integer
+          minimum: 1
+          maximum: 5
+          description: Self-rated confidence, 1 = guessed, 5 = certain.
+        is_correct: {type: boolean}
+        response_time_ms: {type: [integer, 'null'], minimum: 0}
+
+    CardReview:
+      type: object
+      x-django-model:
+        app: learning
+        ordering: [-reviewed_at]
+        indexes:
+          - {name: lrn_review_user_card_idx, fields: [user, flashcard]}
+          - {name: lrn_review_session_idx, fields: [study_session]}
+        constraints:
+          - {type: check, name: lrn_review_conf_range, condition: "models.Q(confidence__gte=1, confidence__lte=5)"}
+      properties:
+        id: {type: integer, readOnly: true}
+        study_session:
+          type: [integer, 'null']
+          readOnly: true
+          x-django-field: {type: ForeignKey, to: StudySession, on_delete: SET_NULL, "null": true, blank: true, related_name: reviews}
+        user:
+          type: integer
+          readOnly: true
+          x-django-field: {type: ForeignKey, to: AUTH_USER_MODEL, on_delete: CASCADE, related_name: card_reviews}
+        flashcard:
+          type: integer
+          readOnly: true
+          x-django-field: {type: ForeignKey, to: Flashcard, on_delete: CASCADE, related_name: reviews}
+        confidence:
+          type: integer
+          minimum: 1
+          maximum: 5
+          x-django-field: {type: PositiveSmallIntegerField}
+        is_correct:
+          type: boolean
+          x-django-field: {type: BooleanField}
+        response_time_ms:
+          type: [integer, 'null']
+          minimum: 0
+          x-django-field: {type: PositiveIntegerField, "null": true, blank: true}
+        reviewed_at:
+          type: string
+          format: date-time
+          readOnly: true
+          x-django-field: {type: DateTimeField, auto_now_add: true, db_index: true}
+
+    ReviewResult:
+      type: object
+      required: [review, progress, session]
+      properties:
+        review: {$ref: '#/components/schemas/CardReview'}
+        progress: {$ref: '#/components/schemas/CardProgressSummary'}
+        session: {$ref: '#/components/schemas/StudySession'}
+        remaining_in_queue: {type: integer}
+
+    StrugglingCard:
+      type: object
+      required: [flashcard, progress]
+      properties:
+        flashcard: {$ref: '#/components/schemas/Flashcard'}
+        progress: {$ref: '#/components/schemas/CardProgressSummary'}
+
+    PracticeTest:
+      type: object
+      x-django-model:
+        app: practice_tests
+        ordering: [-created_at]
+        timestamps: true
+        str_field: title
+        indexes:
+          - {name: pt_test_course_status_idx, fields: [course, status]}
+      properties:
+        id: {type: integer, readOnly: true}
+        course:
+          type: integer
+          readOnly: true
+          x-django-field: {type: ForeignKey, to: Course, on_delete: CASCADE, related_name: practice_tests}
+        study_kit:
+          type: [integer, 'null']
+          readOnly: true
+          x-django-field: {type: ForeignKey, to: StudyKit, on_delete: SET_NULL, "null": true, blank: true, related_name: practice_tests}
+        title:
+          type: string
+          maxLength: 200
+          x-django-field: {type: CharField, max_length: 200}
+        status:
+          $ref: '#/components/schemas/PracticeTestStatus'
+          readOnly: true
+          x-django-field: {type: CharField, max_length: 16, default: pending, db_index: true}
+        difficulty:
+          $ref: '#/components/schemas/TestDifficulty'
+          readOnly: true
+          x-django-field: {type: CharField, max_length: 8, default: medium}
+        time_limit_minutes:
+          type: [integer, 'null']
+          minimum: 1
+          maximum: 600
+          x-django-field: {type: PositiveSmallIntegerField, "null": true, blank: true}
+        documents:
+          type: array
+          readOnly: true
+          items: {type: integer}
+          x-django-field: {type: ManyToManyField, to: Document, related_name: practice_tests, blank: true}
+        generation_job:
+          type: [integer, 'null']
+          readOnly: true
+          x-django-field: {type: ForeignKey, to: AIJob, on_delete: SET_NULL, "null": true, blank: true, related_name: practice_tests}
+        generation_options:
+          type: object
+          readOnly: true
+          additionalProperties: true
+          x-django-field: {type: JSONField, default_factory: dict, blank: true}
+        model_name:
+          type: string
+          maxLength: 100
+          readOnly: true
+          x-django-field: {type: CharField, max_length: 100, blank: true, default: ''}
+        created_at: {type: string, format: date-time, readOnly: true}
+        updated_at: {type: string, format: date-time, readOnly: true}
+        question_count: {type: integer, readOnly: true}
+        total_points: {type: integer, readOnly: true}
+        best_score_percent: {type: [number, 'null'], readOnly: true}
+
+    PracticeTestCreate:
+      type: object
+      required: [course_id, title]
+      properties:
+        course_id: {type: integer}
+        title: {type: string, maxLength: 200}
+        study_kit_id: {type: [integer, 'null']}
+        document_ids:
+          type: array
+          items: {type: integer}
+        multiple_choice_count:
+          type: integer
+          minimum: 0
+          maximum: 100
+          default: 10
+        short_answer_count:
+          type: integer
+          minimum: 0
+          maximum: 50
+          default: 5
+        difficulty:
+          $ref: '#/components/schemas/TestDifficulty'
+          default: medium
+        time_limit_minutes: {type: [integer, 'null'], minimum: 1, maximum: 600}
+        language:
+          type: string
+          default: en
+
+    PracticeTestAccepted:
+      type: object
+      required: [practice_test, job]
+      properties:
+        practice_test: {$ref: '#/components/schemas/PracticeTest'}
+        job: {$ref: '#/components/schemas/AIJob'}
+
+    TestQuestion:
+      type: object
+      description: Full database row. Serializers for students taking a test must use TestQuestionPublic instead.
+      x-django-model:
+        app: practice_tests
+        ordering: [practice_test, position]
+        indexes:
+          - {name: pt_question_test_pos_idx, fields: [practice_test, position]}
+        constraints:
+          - {type: check, name: pt_question_mc_has_answer, condition: "~models.Q(question_type='multiple_choice') | ~models.Q(correct_choice_id='')"}
+      properties:
+        id: {type: integer, readOnly: true}
+        practice_test:
+          type: integer
+          readOnly: true
+          x-django-field: {type: ForeignKey, to: PracticeTest, on_delete: CASCADE, related_name: questions}
+        question_type:
+          $ref: '#/components/schemas/QuestionType'
+          x-django-field: {type: CharField, max_length: 16}
+        prompt:
+          type: string
+          x-django-field: {type: TextField}
+        choices:
+          type: array
+          description: Multiple-choice options. Empty for short-answer questions.
+          items: {$ref: '#/components/schemas/Choice'}
+          x-django-field: {type: JSONField, default_factory: list, blank: true}
+        correct_choice_id:
+          type: string
+          maxLength: 16
+          x-django-field: {type: CharField, max_length: 16, blank: true, default: ''}
+        reference_answer:
+          type: string
+          x-django-field: {type: TextField, blank: true, default: ''}
+        grading_rubric:
+          type: string
+          x-django-field: {type: TextField, blank: true, default: ''}
+        explanation:
+          type: string
+          x-django-field: {type: TextField, blank: true, default: ''}
+        points:
+          type: integer
+          minimum: 1
+          default: 1
+          x-django-field: {type: PositiveSmallIntegerField, default: 1}
+        position:
+          type: integer
+          minimum: 0
+          default: 0
+          x-django-field: {type: PositiveIntegerField, default: 0}
+        source_chunk:
+          type: [integer, 'null']
+          x-django-field: {type: ForeignKey, to: DocumentChunk, on_delete: SET_NULL, "null": true, blank: true, related_name: test_questions}
+
+    Choice:
+      type: object
+      required: [id, text]
+      properties:
+        id: {type: string, maxLength: 16, examples: [a]}
+        text: {type: string}
+
+    TestQuestionPublic:
+      type: object
+      required: [id, question_type, prompt, points, position]
+      properties:
+        id: {type: integer}
+        question_type: {$ref: '#/components/schemas/QuestionType'}
+        prompt: {type: string}
+        choices:
+          type: array
+          items: {$ref: '#/components/schemas/Choice'}
+        points: {type: integer}
+        position: {type: integer}
+
+    TestQuestionResult:
+      allOf:
+        - {$ref: '#/components/schemas/TestQuestionPublic'}
+        - type: object
+          properties:
+            correct_choice_id: {type: string}
+            reference_answer: {type: string}
+            explanation: {type: string}
+            source_chunk: {type: [integer, 'null']}
+
+    TestAttempt:
+      type: object
+      x-django-model:
+        app: practice_tests
+        ordering: [-started_at]
+        indexes:
+          - {name: pt_attempt_user_test_idx, fields: [user, practice_test]}
+      properties:
+        id: {type: integer, readOnly: true}
+        practice_test:
+          type: integer
+          readOnly: true
+          x-django-field: {type: ForeignKey, to: PracticeTest, on_delete: CASCADE, related_name: attempts}
+        user:
+          type: integer
+          readOnly: true
+          x-django-field: {type: ForeignKey, to: AUTH_USER_MODEL, on_delete: CASCADE, related_name: test_attempts}
+        status:
+          $ref: '#/components/schemas/AttemptStatus'
+          readOnly: true
+          x-django-field: {type: CharField, max_length: 16, default: in_progress, db_index: true}
+        started_at:
+          type: string
+          format: date-time
+          readOnly: true
+          x-django-field: {type: DateTimeField, auto_now_add: true}
+        submitted_at:
+          type: [string, 'null']
+          format: date-time
+          readOnly: true
+          x-django-field: {type: DateTimeField, "null": true, blank: true}
+        graded_at:
+          type: [string, 'null']
+          format: date-time
+          readOnly: true
+          x-django-field: {type: DateTimeField, "null": true, blank: true}
+        score_points:
+          type: [number, 'null']
+          readOnly: true
+          x-django-field: {type: FloatField, "null": true, blank: true}
+        max_points:
+          type: integer
+          readOnly: true
+          x-django-field: {type: PositiveIntegerField, default: 0}
+        score_percent:
+          type: [number, 'null']
+          readOnly: true
+          minimum: 0
+          maximum: 100
+          x-django-field: {type: FloatField, "null": true, blank: true}
+        grading_job:
+          type: [integer, 'null']
+          readOnly: true
+          description: The `attempt_grading` job while status is `grading`.
+          x-django-field: {type: ForeignKey, to: AIJob, on_delete: SET_NULL, "null": true, blank: true, related_name: attempts}
+        answered_count: {type: integer, readOnly: true}
+
+    TestAnswer:
+      type: object
+      x-django-model:
+        app: practice_tests
+        ordering: [attempt, question]
+        constraints:
+          - {type: unique, name: pt_answer_attempt_q_uniq, fields: [attempt, question]}
+      properties:
+        id: {type: integer, readOnly: true}
+        attempt:
+          type: integer
+          readOnly: true
+          x-django-field: {type: ForeignKey, to: TestAttempt, on_delete: CASCADE, related_name: answers}
+        question:
+          type: integer
+          readOnly: true
+          x-django-field: {type: ForeignKey, to: TestQuestion, on_delete: CASCADE, related_name: answers}
+        selected_choice_id:
+          type: string
+          maxLength: 16
+          x-django-field: {type: CharField, max_length: 16, blank: true, default: ''}
+        answer_text:
+          type: string
+          x-django-field: {type: TextField, blank: true, default: ''}
+        is_correct:
+          type: [boolean, 'null']
+          readOnly: true
+          x-django-field: {type: BooleanField, "null": true, blank: true}
+        points_awarded:
+          type: [number, 'null']
+          readOnly: true
+          x-django-field: {type: FloatField, "null": true, blank: true}
+        feedback:
+          type: string
+          readOnly: true
+          x-django-field: {type: TextField, blank: true, default: ''}
+        graded_by:
+          $ref: '#/components/schemas/GradedBy'
+          readOnly: true
+          x-django-field: {type: CharField, max_length: 8, blank: true, default: ''}
+        answered_at:
+          type: string
+          format: date-time
+          readOnly: true
+          x-django-field: {type: DateTimeField, auto_now: true}
+
+    AnswerInput:
+      type: object
+      properties:
+        selected_choice_id:
+          type: string
+          maxLength: 16
+          description: Required for multiple-choice questions and must match a choice id.
+        answer_text:
+          type: string
+          maxLength: 5000
+          description: Required for short-answer questions.
+
+    SavedAnswer:
+      type: object
+      required: [question, answered_at]
+      properties:
+        question: {type: integer}
+        selected_choice_id: {type: string}
+        answer_text: {type: string}
+        answered_at: {type: string, format: date-time}
+
+    AttemptResults:
+      type: object
+      required: [attempt, questions]
+      properties:
+        attempt: {$ref: '#/components/schemas/TestAttempt'}
+        grading_job:
+          oneOf:
+            - {$ref: '#/components/schemas/AIJob'}
+            - {type: 'null'}
+        questions:
+          type: array
+          items:
+            type: object
+            required: [question, answer]
+            properties:
+              question: {$ref: '#/components/schemas/TestQuestionResult'}
+              answer:
+                oneOf:
+                  - {$ref: '#/components/schemas/TestAnswer'}
+                  - {type: 'null'}
+
+    DashboardSummary:
+      type: object
+      required: [totals, due_cards_count, study_streak_days, courses]
+      properties:
+        totals:
+          type: object
+          required: [courses, documents, study_kits, flashcards]
+          properties:
+            courses: {type: integer}
+            documents: {type: integer}
+            study_kits: {type: integer}
+            flashcards: {type: integer}
+        due_cards_count: {type: integer}
+        struggling_cards_count: {type: integer}
+        study_streak_days: {type: integer}
+        overall_mastery_percent: {type: number, minimum: 0, maximum: 100}
+        courses:
+          type: array
+          items: {$ref: '#/components/schemas/Course'}
+        recent_study_kits:
+          type: array
+          maxItems: 5
+          items: {$ref: '#/components/schemas/StudyKit'}
+        pending_jobs:
+          type: array
+          items: {$ref: '#/components/schemas/AIJob'}
+        activity_last_7_days:
+          type: array
+          items: {$ref: '#/components/schemas/DailyActivity'}
+
+    DailyActivity:
+      type: object
+      required: [date, cards_reviewed, accuracy_percent]
+      properties:
+        date: {type: string, format: date}
+        cards_reviewed: {type: integer}
+        accuracy_percent: {type: number, minimum: 0, maximum: 100}
+
+    CourseProgress:
+      type: object
+      required: [course_id, total_cards, cards_seen, cards_mastered, mastery_percent, accuracy_percent]
+      properties:
+        course_id: {type: integer}
+        total_cards: {type: integer}
+        cards_seen: {type: integer}
+        cards_mastered: {type: integer}
+        cards_due: {type: integer}
+        struggling_count: {type: integer}
+        mastery_percent: {type: number, minimum: 0, maximum: 100}
+        accuracy_percent: {type: number, minimum: 0, maximum: 100}
+        avg_confidence: {type: number, minimum: 0, maximum: 5}
+        test_attempts_count: {type: integer}
+        test_average_percent: {type: [number, 'null']}
+        total_study_minutes: {type: integer}
+        daily_activity:
+          type: array
+          items: {$ref: '#/components/schemas/DailyActivity'}
+        by_study_kit:
+          type: array
+          items: {$ref: '#/components/schemas/StudyKitProgress'}
+
+    StudyKitProgress:
+      type: object
+      required: [study_kit_id, title, total_cards, cards_seen, cards_mastered, mastery_percent]
+      properties:
+        study_kit_id: {type: integer}
+        title: {type: string}
+        total_cards: {type: integer}
+        cards_seen: {type: integer}
+        cards_mastered: {type: integer}
+        cards_due: {type: integer}
+        struggling_count: {type: integer}
+        mastery_percent: {type: number, minimum: 0, maximum: 100}
+        accuracy_percent: {type: number, minimum: 0, maximum: 100}
+        avg_confidence: {type: number, minimum: 0, maximum: 5}
