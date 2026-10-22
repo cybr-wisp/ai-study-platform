@@ -29,8 +29,10 @@ info:
     Spec extensions the generator reads
     - Component schemas that carry `x-django-model` are database tables. Its `app` key names the owning Django app. Properties that carry `x-django-field` are columns (or many-to-many relations). Properties without it are API-only (derived, nested or computed) and never reach the database.
     - Component schemas with `x-django-enum` become `models.TextChoices` classes in the named app. A property that `$ref`s one of them is given `choices=` automatically.
-    - Tags carry `x-django-app` and `x-django-viewsets`, and operations carry `x-django-action` or `x-django-view`. These are routing and queryset guidance for the hand-written DRF views. The generator does not emit them.
-    - `tools/generate_django.py` writes `<app>/models.py` and `<app>/serializers.py` for every app that owns models. A schema `FooPublic` next to a model `Foo` also yields `FooPublicSerializer` (read-only, restricted to the listed columns). `manage.py makemigrations` then produces one initial migration per app.
+    - Tags carry `x-django-app` and `x-django-viewsets` (one entry per DRF viewset: `route` relative to the app's `url_prefix`, `model`, `queryset_scope` as an ORM lookup that must equal the current user, plus optional `filterset_fields`, `search_fields`, `ordering_fields`, `parser_classes`). A `filterset_fields` entry is either a field name or a `{query_param: orm_lookup}` mapping.
+    - An operation with no extension is standard CRUD on the viewset whose route its path matches. `x-django-action` marks a custom `@action` on a viewset. `x-django-view` marks a plain `APIView`; with a `module` key it points at an existing class such as a simplejwt view instead.
+    - `tools/generate_django.py` writes, for every app that owns models, `<app>/models.py` and `<app>/serializers.py`. A schema `FooPublic` next to a model `Foo` also yields `FooPublicSerializer` (read-only, restricted to the listed columns). `manage.py makemigrations` then produces one initial migration per app.
+    - For every app with endpoints it also writes `<app>/views_base.py` and `<app>/urls.py`, creates `<app>/views.py` once if it is missing, and writes `api_urls.py` and `api_support.py` at the output root. List, retrieve, update and delete work as generated. Create works as generated when the request body is the model's own schema. Every other create, every custom action and every custom view returns 501 until you override its `handle_*` hook (or the HTTP method on a plain view) in `views.py`.
     - API-only properties (no `x-django-field`) are computed in the view layer, usually with queryset annotations.
 
     Conventions
@@ -81,8 +83,8 @@ tags:
     x-django-app: materials
     x-django-viewsets:
       - {name: DocumentViewSet, route: documents, model: Document, queryset_scope: course__owner, filterset_fields: [course, status, file_type], search_fields: [title, original_filename], parser_classes: [MultiPartParser, FormParser, JSONParser]}
-      - {name: DocumentChunkViewSet, route: chunks, model: DocumentChunk, queryset_scope: document__course__owner, mixins: [RetrieveModelMixin]}
-      - {name: AIJobViewSet, route: jobs, model: AIJob, queryset_scope: course__owner, filterset_fields: [course, job_type, status], mixins: [ListModelMixin, RetrieveModelMixin]}
+      - {name: DocumentChunkViewSet, route: chunks, model: DocumentChunk, queryset_scope: document__course__owner}
+      - {name: AIJobViewSet, route: jobs, model: AIJob, queryset_scope: course__owner, filterset_fields: [course, job_type, status]}
   - name: study_kits
     description: AI-generated summaries, key concepts and study guides.
     x-django-app: study_kits
@@ -98,12 +100,12 @@ tags:
     x-django-app: learning
     x-django-viewsets:
       - {name: StudySessionViewSet, route: sessions, model: StudySession, queryset_scope: user, filterset_fields: [course, study_kit, mode]}
-      - {name: CardProgressViewSet, route: card-progress, model: CardProgress, queryset_scope: user, filterset_fields: [flashcard, flashcard__study_kit, flashcard__study_kit__course], mixins: [ListModelMixin]}
+      - {name: CardProgressViewSet, route: card-progress, model: CardProgress, queryset_scope: user, filterset_fields: [flashcard, {study_kit: flashcard__study_kit}, {course: flashcard__study_kit__course}]}
   - name: practice_tests
     description: AI-generated multiple-choice and short-answer practice tests with grading and explanations. The attempts route must be registered before the empty route.
     x-django-app: practice_tests
     x-django-viewsets:
-      - {name: TestAttemptViewSet, route: attempts, model: TestAttempt, queryset_scope: user, filterset_fields: [status, practice_test], mixins: [RetrieveModelMixin]}
+      - {name: TestAttemptViewSet, route: attempts, model: TestAttempt, queryset_scope: user, filterset_fields: [status, practice_test]}
       - {name: PracticeTestViewSet, route: '', model: PracticeTest, queryset_scope: course__owner, filterset_fields: [course, status, difficulty]}
 
 paths:
@@ -113,6 +115,7 @@ paths:
       operationId: accounts_register
       summary: Register a student account
       security: []
+      x-django-view: {name: RegisterView}
       requestBody:
         required: true
         content:
@@ -130,6 +133,7 @@ paths:
       operationId: accounts_token_obtain
       summary: Exchange credentials for an access and refresh token
       security: []
+      x-django-view: {name: TokenObtainPairView, module: rest_framework_simplejwt.views}
       requestBody:
         required: true
         content:
@@ -147,6 +151,7 @@ paths:
       operationId: accounts_token_refresh
       summary: Exchange a refresh token for a new access token
       security: []
+      x-django-view: {name: TokenRefreshView, module: rest_framework_simplejwt.views}
       requestBody:
         required: true
         content:

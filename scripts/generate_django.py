@@ -1,4 +1,5 @@
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -10,6 +11,33 @@ ACRONYMS = {"pdf", "pptx", "docx", "txt", "md", "ai"}
 TIMESTAMP_FIELDS = ("created_at", "updated_at")
 AUTH_TOKEN = "AUTH_USER_MODEL"
 MAX_INDEX_NAME = 30
+HTTP_METHODS = ("get", "post", "put", "patch", "delete")
+PARSER_NAMES = ("FormParser", "JSONParser", "MultiPartParser")
+
+SUPPORT_MODULE = """from django.db import IntegrityError, transaction
+from rest_framework import status
+from rest_framework.exceptions import ValidationError
+from rest_framework.pagination import PageNumberPagination
+from rest_framework.response import Response
+
+
+class StandardPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
+def not_implemented():
+    return Response({'detail': 'Not implemented.'}, status=status.HTTP_501_NOT_IMPLEMENTED)
+
+
+def save_or_conflict(serializer, **kwargs):
+    try:
+        with transaction.atomic():
+            return serializer.save(**kwargs)
+    except IntegrityError:
+        raise ValidationError({'detail': ['This change conflicts with an existing object.']}) from None
+"""
 
 
 def ref_name(ref):
@@ -21,16 +49,16 @@ def enum_label(value):
     return text.upper() if value in ACRONYMS else text.capitalize()
 
 
+def snake(name):
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+
 def model_meta(schema):
     return schema["x-django-model"]
 
 
 def auth_model_name(context):
     return context["auth_user_model"].split(".")[1]
-
-
-def auth_app(context):
-    return context["auth_user_model"].split(".")[0]
 
 
 def column_names(schema):
@@ -142,6 +170,124 @@ def order_apps(context):
     return order
 
 
+def django_route(path):
+    return re.sub(r"\{(\w+)\}", lambda match: f"<int:{snake(match.group(1))}>", path.strip("/"))
+
+
+def action_name(url_path):
+    return re.split(r"[/(]", url_path)[0].replace("-", "_")
+
+
+def normalize_filters(entries):
+    pairs = []
+    for entry in entries:
+        if isinstance(entry, dict):
+            pairs.extend(entry.items())
+        else:
+            pairs.append((entry, entry))
+    return pairs
+
+
+def register_viewsets(spec, context, endpoints):
+    prefixes = {app: config["url_prefix"] for app, config in spec["x-django"]["apps"].items()}
+    for tag in spec.get("tags", []):
+        app = tag.get("x-django-app")
+        for config in tag.get("x-django-viewsets") or []:
+            model = config["model"]
+            if model not in context["models"] or model_meta(context["models"][model])["app"] != app:
+                raise ValueError(f"{config['name']}: model {model!r} is not a model of app {app!r}")
+            parsers = config.get("parser_classes") or []
+            for parser in parsers:
+                if parser not in PARSER_NAMES:
+                    raise ValueError(f"{config['name']}: unsupported parser {parser!r}")
+            route = "/".join(part for part in (prefixes[app], config["route"]) if part)
+            endpoints[app]["viewsets"][config["name"]] = {
+                "name": config["name"],
+                "model": model,
+                "route": route,
+                "scope": config["queryset_scope"],
+                "filters": normalize_filters(config.get("filterset_fields") or []),
+                "search": config.get("search_fields") or [],
+                "ordering": config.get("ordering_fields") or [],
+                "parsers": parsers,
+                "collection": {},
+                "detail": {},
+                "actions": {},
+            }
+
+
+def match_viewset(path, app, endpoints):
+    segments = path.strip("/").split("/")
+    for viewset in endpoints[app]["viewsets"].values():
+        route = viewset["route"].split("/")
+        if segments == route:
+            return viewset, "collection"
+        if len(segments) == len(route) + 1 and segments[:-1] == route and segments[-1].startswith("{"):
+            return viewset, "detail"
+    return None, None
+
+
+def is_plain_create(operation, viewset):
+    body = operation.get("requestBody", {}).get("content", {}).get("application/json", {}).get("schema", {})
+    return body.get("$ref") == SCHEMA_PREFIX + viewset["model"] and "__" not in viewset["scope"]
+
+
+def register_operations(spec, endpoints):
+    for path, item in spec["paths"].items():
+        for method in HTTP_METHODS:
+            operation = item.get(method)
+            if not operation:
+                continue
+            app = operation["tags"][0]
+            where = f"{method.upper()} {path}"
+            if "x-django-action" in operation:
+                action = operation["x-django-action"]
+                viewset = endpoints[app]["viewsets"].get(action["viewset"])
+                if viewset is None:
+                    raise ValueError(f"{where}: unknown viewset {action['viewset']!r}")
+                entry = viewset["actions"].setdefault(
+                    action["url_path"],
+                    {
+                        "name": action_name(action["url_path"]),
+                        "detail": action["detail"],
+                        "url_path": action["url_path"],
+                        "methods": [],
+                    },
+                )
+                if method not in entry["methods"]:
+                    entry["methods"].append(method)
+            elif "x-django-view" in operation:
+                view = operation["x-django-view"]
+                route = django_route(path)
+                entry = endpoints[app]["views"].setdefault(
+                    view["name"],
+                    {
+                        "name": view["name"],
+                        "module": view.get("module"),
+                        "route": route,
+                        "methods": [],
+                        "public": operation.get("security") == [],
+                    },
+                )
+                if entry["route"] != route:
+                    raise ValueError(f"{where}: view {view['name']} is already mounted at {entry['route']}")
+                entry["methods"].append(method)
+            else:
+                viewset, kind = match_viewset(path, app, endpoints)
+                if viewset is None:
+                    raise ValueError(f"{where}: not an action or view and matches no viewset route")
+                if kind == "collection":
+                    if method not in ("get", "post"):
+                        raise ValueError(f"{where}: collection routes support only get and post")
+                    viewset["collection"][method] = {
+                        "plain": is_plain_create(operation, viewset) if method == "post" else True
+                    }
+                else:
+                    if method == "post":
+                        raise ValueError(f"{where}: detail routes do not support post")
+                    viewset["detail"][method] = {"plain": True}
+
+
 def build_context(spec):
     schemas = spec["components"]["schemas"]
     config = spec["x-django"]
@@ -165,6 +311,10 @@ def build_context(spec):
         validate_model(name, schema, context)
     check_names(context)
     context["app_order"] = order_apps(context)
+    endpoints = {app: {"viewsets": {}, "views": {}} for app in context["apps"]}
+    register_viewsets(spec, context, endpoints)
+    register_operations(spec, endpoints)
+    context["endpoints"] = endpoints
     return context
 
 
@@ -332,12 +482,18 @@ def render_serializer(serializer, model, fields, read_only):
     )
 
 
+def serializable_models(app, context):
+    return {
+        name: schema
+        for name, schema in app_models(app, context).items()
+        if model_meta(schema).get("serializer") is not False
+    }
+
+
 def render_app_serializers(app, context):
     blocks = []
     names = []
-    for name, schema in app_models(app, context).items():
-        if model_meta(schema).get("serializer") is False:
-            continue
+    for name, schema in serializable_models(app, context).items():
         columns = column_names(schema)
         props = schema["properties"]
         fields = ["id", *columns]
@@ -363,21 +519,292 @@ def render_app_serializers(app, context):
     return header + "\n\n\n".join(blocks) + "\n"
 
 
+def filter_kind(model_name, path, context):
+    parts = path.split("__")
+    current = model_name
+    for index, part in enumerate(parts):
+        prop = context["models"][current]["properties"].get(part)
+        if not prop or "x-django-field" not in prop:
+            raise ValueError(f"{model_name}: filter lookup {path!r} does not resolve ({part!r} is not a column of {current})")
+        field = prop["x-django-field"]
+        if index < len(parts) - 1:
+            if field["type"] not in RELATION_TYPES:
+                raise ValueError(f"{model_name}: filter lookup {path!r} crosses non-relation {part!r}")
+            current = relation_target(field, context)
+    if field["type"] == "BooleanField":
+        return "BooleanFilter"
+    if "$ref" in prop or field["type"] in ("CharField", "TextField"):
+        return "CharFilter"
+    return "NumberFilter"
+
+
+def filterset_name(viewset):
+    return viewset["name"].replace("ViewSet", "") + "Filter"
+
+
+def render_filterset(viewset, context):
+    lines = [f"class {filterset_name(viewset)}(filters.FilterSet):"]
+    for param, path in viewset["filters"]:
+        kind = filter_kind(viewset["model"], path, context)
+        lines.append(f"    {param} = filters.{kind}(field_name={path!r})")
+    lines.extend(["", "    class Meta:", f"        model = {viewset['model']}", "        fields = []"])
+    return "\n".join(lines)
+
+
+def render_action(action):
+    name = action["name"]
+    arguments = [
+        f"detail={action['detail']}",
+        f"methods={action['methods']!r}",
+        f"url_path={action['url_path']!r}",
+    ]
+    lines = [
+        "",
+        f"    @action({', '.join(arguments)})",
+        f"    def {name}(self, request, *args, **kwargs):",
+        "        method = request.method.lower()",
+        "        method = 'get' if method == 'head' else method",
+        "        return getattr(self, f'handle_" + name + "_{method}')(request, *args, **kwargs)",
+    ]
+    for method in action["methods"]:
+        lines.extend(
+            ["", f"    def handle_{name}_{method}(self, request, *args, **kwargs):", "        return not_implemented()"]
+        )
+    return lines
+
+
+def render_viewset(viewset):
+    model = viewset["model"]
+    scope = viewset["scope"]
+    collection = viewset["collection"]
+    detail = viewset["detail"]
+    plain_create = bool(collection.get("post", {}).get("plain"))
+
+    mixin_names = []
+    if "get" in collection:
+        mixin_names.append("ListModelMixin")
+    if plain_create:
+        mixin_names.append("CreateModelMixin")
+    if "get" in detail:
+        mixin_names.append("RetrieveModelMixin")
+    if "put" in detail or "patch" in detail:
+        mixin_names.append("UpdateModelMixin")
+    if "delete" in detail:
+        mixin_names.append("DestroyModelMixin")
+    bases = ", ".join([f"mixins.{name}" for name in mixin_names] + ["viewsets.GenericViewSet"])
+
+    methods = set(collection) | set(detail)
+    for action in viewset["actions"].values():
+        methods.update(action["methods"])
+    allowed = sorted(methods) + ["head", "options"]
+
+    lines = [
+        f"class {viewset['name']}Base({bases}):",
+        f"    serializer_class = {model}Serializer",
+        "    permission_classes = [IsAuthenticated]",
+        f"    http_method_names = {allowed!r}",
+        "    lookup_value_regex = '[0-9]+'",
+    ]
+    if "get" in collection:
+        lines.append("    pagination_class = StandardPagination")
+    backends = []
+    if viewset["filters"]:
+        backends.append("filters.DjangoFilterBackend")
+        lines.append(f"    filterset_class = {filterset_name(viewset)}")
+    if viewset["search"]:
+        backends.append("SearchFilter")
+        lines.append(f"    search_fields = {viewset['search']!r}")
+    if viewset["ordering"]:
+        backends.append("OrderingFilter")
+        lines.append(f"    ordering_fields = {viewset['ordering']!r}")
+    if backends:
+        lines.append(f"    filter_backends = [{', '.join(backends)}]")
+    if viewset["parsers"]:
+        lines.append(f"    parser_classes = [{', '.join(viewset['parsers'])}]")
+
+    lines.extend(
+        ["", "    def get_queryset(self):", f"        return {model}.objects.filter({scope}=self.request.user)"]
+    )
+    if plain_create:
+        lines.extend(
+            [
+                "",
+                "    def perform_create(self, serializer):",
+                f"        save_or_conflict(serializer, {scope}=self.request.user)",
+            ]
+        )
+    if "put" in detail or "patch" in detail:
+        lines.extend(["", "    def perform_update(self, serializer):", "        save_or_conflict(serializer)"])
+    if "post" in collection and not plain_create:
+        lines.extend(
+            [
+                "",
+                "    def create(self, request, *args, **kwargs):",
+                "        return self.handle_create(request, *args, **kwargs)",
+                "",
+                "    def handle_create(self, request, *args, **kwargs):",
+                "        return not_implemented()",
+            ]
+        )
+    for action in viewset["actions"].values():
+        lines.extend(render_action(action))
+    return "\n".join(lines)
+
+
+def render_view(view):
+    permission = "AllowAny" if view["public"] else "IsAuthenticated"
+    lines = [f"class {view['name']}Base(APIView):", f"    permission_classes = [{permission}]"]
+    for method in view["methods"]:
+        lines.extend(["", f"    def {method}(self, request, *args, **kwargs):", "        return not_implemented()"])
+    return "\n".join(lines)
+
+
+def app_view_classes(app, context):
+    endpoints = context["endpoints"][app]
+    viewsets = list(endpoints["viewsets"].values())
+    views = [view for view in endpoints["views"].values() if not view["module"]]
+    return viewsets, views
+
+
+def render_app_views_base(app, context):
+    viewsets, views = app_view_classes(app, context)
+    if not viewsets and not views:
+        return None
+    blocks = [render_filterset(viewset, context) for viewset in viewsets if viewset["filters"]]
+    blocks.extend(render_viewset(viewset) for viewset in viewsets)
+    blocks.extend(render_view(view) for view in views)
+    body = "\n\n\n".join(blocks)
+
+    third_party = []
+    if "filters." in body:
+        third_party.append("from django_filters import rest_framework as filters")
+    framework = [name for name in ("mixins", "viewsets") if f"{name}." in body]
+    if framework:
+        third_party.append(f"from rest_framework import {', '.join(framework)}")
+    if "@action" in body:
+        third_party.append("from rest_framework.decorators import action")
+    backends = [name for name in ("OrderingFilter", "SearchFilter") if name in body]
+    if backends:
+        third_party.append(f"from rest_framework.filters import {', '.join(backends)}")
+    parsers = [name for name in PARSER_NAMES if name in body]
+    if parsers:
+        third_party.append(f"from rest_framework.parsers import {', '.join(parsers)}")
+    permissions = [name for name in ("AllowAny", "IsAuthenticated") if name in body]
+    if permissions:
+        third_party.append(f"from rest_framework.permissions import {', '.join(permissions)}")
+    if "APIView" in body:
+        third_party.append("from rest_framework.views import APIView")
+
+    local = []
+    support = [name for name in ("StandardPagination", "not_implemented", "save_or_conflict") if name in body]
+    if support:
+        local.append(f"from api_support import {', '.join(support)}")
+    models = sorted({viewset["model"] for viewset in viewsets})
+    if models:
+        local.append(f"from .models import {', '.join(models)}")
+        local.append(f"from .serializers import {', '.join(f'{model}Serializer' for model in models)}")
+
+    header = "\n".join(third_party)
+    if local:
+        header += "\n\n" + "\n".join(local)
+    return header + "\n\n\n" + body + "\n"
+
+
+def render_app_views(app, context):
+    viewsets, views = app_view_classes(app, context)
+    names = [viewset["name"] for viewset in viewsets] + [view["name"] for view in views]
+    if not names:
+        return None
+    header = f"from .views_base import {', '.join(f'{name}Base' for name in names)}\n\n\n"
+    blocks = [f"class {name}({name}Base):\n    pass" for name in names]
+    return header + "\n\n\n".join(blocks) + "\n"
+
+
+def url_name(view_name):
+    return snake(view_name.removesuffix("View"))
+
+
+def render_app_urls(app, context):
+    endpoints = context["endpoints"][app]
+    viewsets = sorted(
+        endpoints["viewsets"].values(),
+        key=lambda viewset: (-len(viewset["route"].split("/")), viewset["name"]),
+    )
+    views = list(endpoints["views"].values())
+    if not viewsets and not views:
+        return None
+    external = {}
+    for view in views:
+        if view["module"]:
+            external.setdefault(view["module"], []).append(view["name"])
+
+    third_party = []
+    if views:
+        third_party.append("from django.urls import path")
+    if viewsets:
+        third_party.append("from rest_framework.routers import SimpleRouter")
+    for module, names in external.items():
+        third_party.append(f"from {module} import {', '.join(sorted(names))}")
+    third_party.sort()
+
+    lines = ["\n".join(third_party)]
+    if viewsets or any(not view["module"] for view in views):
+        lines[0] += "\n\nfrom . import views"
+    lines.extend(["", f"app_name = {app!r}"])
+    if viewsets:
+        lines.extend(["", "router = SimpleRouter(trailing_slash=False)"])
+        for viewset in viewsets:
+            basename = snake(viewset["model"])
+            lines.append(
+                f"router.register({viewset['route']!r}, views.{viewset['name']}, basename={basename!r})"
+            )
+    lines.extend(["", "urlpatterns = ["])
+    for view in views:
+        target = view["name"] if view["module"] else f"views.{view['name']}"
+        lines.append(f"    path({view['route']!r}, {target}.as_view(), name={url_name(view['name'])!r}),")
+    if viewsets:
+        lines.append("    *router.urls,")
+    lines.append("]")
+    return "\n".join(lines) + "\n"
+
+
+def render_root_urls(apps):
+    lines = ["from django.urls import include, path", "", "", "urlpatterns = ["]
+    lines.extend(f"    path('', include('{app}.urls'))," for app in apps)
+    lines.append("]")
+    return "\n".join(lines) + "\n"
+
+
 def render_all(context):
-    outputs = {}
+    generated = {}
+    scaffold = {}
+    routed = []
     for app in context["app_order"]:
-        if not app_models(app, context):
-            continue
-        outputs[Path(app) / "models.py"] = render_app_models(app, context)
-        serializers = render_app_serializers(app, context)
-        if serializers:
-            outputs[Path(app) / "serializers.py"] = serializers
-    return outputs
+        if app_models(app, context):
+            generated[Path(app) / "models.py"] = render_app_models(app, context)
+            serializers = render_app_serializers(app, context)
+            if serializers:
+                generated[Path(app) / "serializers.py"] = serializers
+        views_base = render_app_views_base(app, context)
+        urls = render_app_urls(app, context)
+        if urls:
+            routed.append(app)
+            generated[Path(app) / "urls.py"] = urls
+        if views_base:
+            generated[Path(app) / "views_base.py"] = views_base
+            scaffold[Path(app) / "views.py"] = render_app_views(app, context)
+    generated[Path("api_support.py")] = SUPPORT_MODULE
+    generated[Path("api_urls.py")] = render_root_urls(routed)
+    return generated, scaffold
+
+
+def class_names(source):
+    return re.findall(r"^class (\w+)\(", source, re.MULTILINE)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Generate per-app Django models.py and serializers.py from the OpenAPI spec."
+        description="Generate per-app Django models, serializers, views and URLs from the OpenAPI spec."
     )
     parser.add_argument("spec", type=Path)
     parser.add_argument("--out", type=Path, required=True)
@@ -386,10 +813,10 @@ def main(argv=None):
 
     spec = yaml.safe_load(args.spec.read_text(encoding="utf-8"))
     context = build_context(spec)
-    outputs = render_all(context)
+    generated, scaffold = render_all(context)
 
     drift = False
-    for relative, content in outputs.items():
+    for relative, content in generated.items():
         target = args.out / relative
         if args.check:
             if not target.exists() or target.read_text(encoding="utf-8") != content:
@@ -399,6 +826,21 @@ def main(argv=None):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
             print(f"wrote {target}")
+
+    for relative, content in scaffold.items():
+        target = args.out / relative
+        if target.exists():
+            missing = sorted(set(class_names(content)) - set(class_names(target.read_text(encoding="utf-8"))))
+            if missing:
+                print(f"warning: {target} is missing {', '.join(missing)}", file=sys.stderr)
+        elif args.check:
+            print(f"missing: {target}", file=sys.stderr)
+            drift = True
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+            print(f"created {target}")
+
     if not args.check:
         print("app dependency order: " + " -> ".join(context["app_order"]))
     return 1 if drift else 0
