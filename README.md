@@ -158,11 +158,7 @@ Never commit the `.env` file.
 
 ### 6. Run Database Migrations
 
-Once Django settings and PostgreSQL are configured:
-
-```powershell
-python manage.py migrate
-```
+See [Database Setup](docs/user_guide/database_setup.md) for a one time database setup guide
 
 ### 7. Start the Django Development Server
 
