@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "ai-study-platform",
   "version": "0.1.0",
   "private": true,
@@ -8,5 +8,8 @@
     "dev": "echo Set up the Next.js apps first",
     "build": "echo Build pipeline not configured yet",
     "test": "echo Test pipeline not configured yet"
+  },
+  "dependencies": {
+    "openai": "^7.39.0"
   }
 }
