@@ -1,26 +1,26 @@
 import MaterialCard from "./MaterialCard";
 import styles from "./CourseSection.module.css";
-import type { Course, Material } from "./types";
+import type { Course, StudyKit } from "./types";
 
 interface CourseSectionProps {
   course: Course;
-  materials: Material[];
+  kits: StudyKit[];
   onEdit?: (course: Course) => void;
 }
 
 export default function CourseSection({
   course,
-  materials,
+  kits,
   onEdit,
 }: CourseSectionProps) {
   return (
     <section className={styles.section}>
       <div className={styles.header}>
-        <h2 className={styles.name}>{course.name}</h2>
+        <h2 className={styles.name}>{course.title}</h2>
         <button
           type="button"
           className={styles.edit}
-          aria-label={`Edit ${course.name}`}
+          aria-label={`Edit ${course.title}`}
           onClick={() => onEdit?.(course)}
         >
           <svg
@@ -40,8 +40,8 @@ export default function CourseSection({
         </button>
       </div>
       <div className={styles.cards}>
-        {materials.map((material) => (
-          <MaterialCard key={material.id} material={material} />
+        {kits.map((kit) => (
+          <MaterialCard key={kit.id} kit={kit} />
         ))}
       </div>
     </section>

@@ -1,39 +1,85 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { listCourses, listStudyKits } from "../../lib/api";
+import AddCourseDialog from "../upload/AddCourseDialog";
 import UploadTile from "../upload/UploadTile";
 import CourseSection from "./CourseSection";
+import MaterialCard from "./MaterialCard";
 import styles from "./Dashboard.module.css";
-import type { Course, Material } from "./types";
+import type { Course, StudyKit } from "./types";
 
-const ALL_CLASSES = "all";
+type ViewMode = "class" | "study-kit";
 
-interface DashboardProps {
-  courses: Course[];
-}
-
-export default function Dashboard({ courses }: DashboardProps) {
+export default function Dashboard() {
+  const [courses, setCourses] = useState<Course[]>([]);
+  const [kits, setKits] = useState<StudyKit[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [classId, setClassId] = useState(ALL_CLASSES);
+  const [mode, setMode] = useState<ViewMode>("class");
+  const [dialogOpen, setDialogOpen] = useState(false);
 
-  const visible = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return courses
-      .filter((course) => classId === ALL_CLASSES || course.id === classId)
-      .map((course): { course: Course; materials: Material[] } => {
-        const courseMatches = course.name.toLowerCase().includes(q);
-        const materials = courseMatches
-          ? course.materials
-          : course.materials.filter((m) => m.title.toLowerCase().includes(q));
-        return { course, materials };
-      })
-      .filter(({ materials }) => materials.length > 0);
-  }, [courses, query, classId]);
+  const load = useCallback(async () => {
+    try {
+      const [c, k] = await Promise.all([listCourses(), listStudyKits()]);
+      setCourses(c);
+      setKits(k);
+      setError(null);
+    } catch {
+      setError("Could not load your courses. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const q = query.trim().toLowerCase();
+  const courseById = useMemo(
+    () => new Map(courses.map((course) => [course.id, course])),
+    [courses],
+  );
+
+  // Class view: kits grouped under their course. While searching, only
+  // courses with a match are shown; otherwise empty courses stay visible.
+  const sections = useMemo(
+    () =>
+      courses
+        .map((course) => {
+          const courseMatches = course.title.toLowerCase().includes(q);
+          const own = kits.filter((kit) => kit.course === course.id);
+          const matching = courseMatches
+            ? own
+            : own.filter((kit) => kit.title.toLowerCase().includes(q));
+          return { course, kits: matching };
+        })
+        .filter(({ course, kits: matching }) => !q || matching.length > 0 || course.title.toLowerCase().includes(q)),
+    [courses, kits, q],
+  );
+
+  // Study kit view: every kit, newest first (the API returns them that way).
+  const flatKits = useMemo(
+    () =>
+      kits.filter((kit) => {
+        const courseTitle = courseById.get(kit.course)?.title ?? "";
+        return (
+          kit.title.toLowerCase().includes(q) ||
+          courseTitle.toLowerCase().includes(q)
+        );
+      }),
+    [kits, courseById, q],
+  );
+
+  const isEmpty =
+    mode === "class" ? sections.length === 0 : flatKits.length === 0;
 
   return (
     <main className={styles.page}>
       <div className={styles.upload}>
-        <UploadTile />
+        <UploadTile onClick={() => setDialogOpen(true)} />
       </div>
 
       <div className={styles.toolbar}>
@@ -42,7 +88,7 @@ export default function Dashboard({ courses }: DashboardProps) {
             type="search"
             className={styles.searchInput}
             placeholder="Search"
-            aria-label="Search materials"
+            aria-label="Search study kits"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
@@ -64,16 +110,12 @@ export default function Dashboard({ courses }: DashboardProps) {
         <div className={styles.classSelect}>
           <select
             className={styles.select}
-            aria-label="Filter by class"
-            value={classId}
-            onChange={(e) => setClassId(e.target.value)}
+            aria-label="View by"
+            value={mode}
+            onChange={(e) => setMode(e.target.value as ViewMode)}
           >
-            <option value={ALL_CLASSES}>Class</option>
-            {courses.map((course) => (
-              <option key={course.id} value={course.id}>
-                {course.name}
-              </option>
-            ))}
+            <option value="class">Class</option>
+            <option value="study-kit">Study Kit</option>
           </select>
           <svg
             className={styles.chevron}
@@ -93,14 +135,38 @@ export default function Dashboard({ courses }: DashboardProps) {
       </div>
 
       <div className={styles.courses}>
-        {visible.length === 0 ? (
-          <p className={styles.empty}>No materials found.</p>
-        ) : (
-          visible.map(({ course, materials }) => (
-            <CourseSection key={course.id} course={course} materials={materials} />
+        {loading ? (
+          <p className={styles.empty}>Loading…</p>
+        ) : error ? (
+          <p className={styles.empty} role="alert">
+            {error}
+          </p>
+        ) : isEmpty ? (
+          <p className={styles.empty}>
+            {q ? "No study kits found." : "No courses yet. Add one to get started."}
+          </p>
+        ) : mode === "class" ? (
+          sections.map(({ course, kits: sectionKits }) => (
+            <CourseSection key={course.id} course={course} kits={sectionKits} />
           ))
+        ) : (
+          <div className={styles.flat}>
+            {flatKits.map((kit) => (
+              <MaterialCard
+                key={kit.id}
+                kit={kit}
+                courseName={courseById.get(kit.course)?.title}
+              />
+            ))}
+          </div>
         )}
       </div>
+
+      <AddCourseDialog
+        open={dialogOpen}
+        onClose={() => setDialogOpen(false)}
+        onCreated={load}
+      />
     </main>
   );
 }

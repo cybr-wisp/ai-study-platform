@@ -1,15 +1,27 @@
-export type MaterialType = "lecture" | "tutorial";
-
-export interface Material {
-  id: string;
-  title: string;
-  type: MaterialType;
-  /** Mastery / completion, 0-100. */
-  progress: number;
-}
+export type StudyKitType = "lecture" | "tutorial";
 
 export interface Course {
-  id: string;
-  name: string;
-  materials: Material[];
+  id: number;
+  title: string;
+  code: string;
+  color: string;
+  position: number;
+  is_archived: boolean;
+}
+
+export interface StudyKit {
+  id: number;
+  course: number;
+  title: string;
+  kit_type: StudyKitType;
+  /** Mastery of the kit's flashcards, 0-100. */
+  mastery_percent: number;
+  created_at: string;
+}
+
+export interface Page<T> {
+  count: number;
+  next: string | null;
+  previous: string | null;
+  results: T[];
 }

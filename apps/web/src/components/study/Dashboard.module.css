@@ -74,6 +74,12 @@
   padding: 10px 8px;
 }
 
+.flat {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
 .empty {
   margin: 0;
   color: #666;
