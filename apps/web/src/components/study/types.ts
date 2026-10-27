@@ -19,6 +19,14 @@ export interface StudyKit {
   created_at: string;
 }
 
+export interface Document {
+  id: number;
+  course: number;
+  title: string;
+  original_filename: string;
+  status: "uploaded" | "queued" | "processing" | "processed" | "failed";
+}
+
 export interface Page<T> {
   count: number;
   next: string | null;

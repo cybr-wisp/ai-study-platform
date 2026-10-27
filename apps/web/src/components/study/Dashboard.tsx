@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { listCourses, listStudyKits } from "../../lib/api";
-import AddCourseDialog from "../upload/AddCourseDialog";
+import AddMaterialsDialog from "../upload/AddMaterialsDialog";
 import UploadTile from "../upload/UploadTile";
 import CourseSection from "./CourseSection";
 import MaterialCard from "./MaterialCard";
@@ -165,10 +165,10 @@ export default function Dashboard() {
         )}
       </div>
 
-      <AddCourseDialog
+      <AddMaterialsDialog
         open={dialogOpen}
+        courses={courses}
         onClose={() => setDialogOpen(false)}
-        onCreated={load}
       />
     </main>
   );
