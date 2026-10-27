@@ -38,3 +38,7 @@ Thumbs.db
 uploads/
 local-data/
 *.sqlite3
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
