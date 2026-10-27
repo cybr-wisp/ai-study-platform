@@ -1,7 +1,7 @@
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.views import APIView
 
-from api_support import not_implemented
+from apps.api_support import not_implemented
 
 
 class RegisterViewBase(APIView):

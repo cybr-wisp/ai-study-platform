@@ -9,9 +9,15 @@ class StudyKitStatus(models.TextChoices):
     FAILED = 'failed', 'Failed'
 
 
+class StudyKitType(models.TextChoices):
+    LECTURE = 'lecture', 'Lecture'
+    TUTORIAL = 'tutorial', 'Tutorial'
+
+
 class StudyKit(models.Model):
     course = models.ForeignKey('courses.Course', on_delete=models.CASCADE, related_name='study_kits')
     title = models.CharField(max_length=200)
+    kit_type = models.CharField(choices=StudyKitType.choices, max_length=16, default=StudyKitType.LECTURE)
     status = models.CharField(choices=StudyKitStatus.choices, max_length=16, default=StudyKitStatus.PENDING, db_index=True)
     summary = models.TextField(blank=True, default='')
     study_guide = models.TextField(blank=True, default='')

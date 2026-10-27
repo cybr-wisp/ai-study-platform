@@ -5,7 +5,7 @@ from rest_framework.filters import SearchFilter
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 
-from api_support import StandardPagination, not_implemented, save_or_conflict
+from apps.api_support import StandardPagination, not_implemented, save_or_conflict
 from .models import AIJob, Document, DocumentChunk
 from .serializers import AIJobSerializer, DocumentSerializer, DocumentChunkSerializer
 

@@ -2,12 +2,12 @@ from django.urls import include, path
 
 
 urlpatterns = [
-    path('', include('accounts.urls')),
-    path('', include('analytics.urls')),
-    path('', include('courses.urls')),
-    path('', include('materials.urls')),
-    path('', include('study_kits.urls')),
-    path('', include('flashcards.urls')),
-    path('', include('learning.urls')),
-    path('', include('practice_tests.urls')),
+    path('', include('apps.accounts.urls')),
+    path('', include('apps.analytics.urls')),
+    path('', include('apps.courses.urls')),
+    path('', include('apps.materials.urls')),
+    path('', include('apps.study_kits.urls')),
+    path('', include('apps.flashcards.urls')),
+    path('', include('apps.learning.urls')),
+    path('', include('apps.practice_tests.urls')),
 ]

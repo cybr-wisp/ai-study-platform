@@ -4,7 +4,7 @@ from rest_framework.decorators import action
 from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework.permissions import IsAuthenticated
 
-from api_support import StandardPagination, not_implemented, save_or_conflict
+from apps.api_support import StandardPagination, not_implemented, save_or_conflict
 from .models import Course
 from .serializers import CourseSerializer
 

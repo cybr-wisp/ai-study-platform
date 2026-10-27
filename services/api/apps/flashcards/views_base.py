@@ -2,7 +2,7 @@ from django_filters import rest_framework as filters
 from rest_framework import mixins, viewsets
 from rest_framework.permissions import IsAuthenticated
 
-from api_support import StandardPagination, not_implemented, save_or_conflict
+from apps.api_support import StandardPagination, not_implemented, save_or_conflict
 from .models import Flashcard
 from .serializers import FlashcardSerializer
 

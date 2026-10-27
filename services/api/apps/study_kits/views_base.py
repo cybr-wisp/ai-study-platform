@@ -3,7 +3,7 @@ from rest_framework import mixins, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 
-from api_support import StandardPagination, not_implemented, save_or_conflict
+from apps.api_support import StandardPagination, not_implemented, save_or_conflict
 from .models import StudyKit
 from .serializers import StudyKitSerializer
 

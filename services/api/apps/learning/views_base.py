@@ -4,7 +4,7 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 
-from api_support import StandardPagination, not_implemented
+from apps.api_support import StandardPagination, not_implemented
 from .models import CardProgress, StudySession
 from .serializers import CardProgressSerializer, StudySessionSerializer
 
