@@ -50,7 +50,10 @@ export default function Dashboard() {
       courses
         .map((course) => {
           const courseMatches = course.title.toLowerCase().includes(q);
-          const own = kits.filter((kit) => kit.course === course.id);
+          // Oldest first within a course (Lecture 1, Lecture 2, ...).
+          const own = kits
+            .filter((kit) => kit.course === course.id)
+            .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id - b.id);
           const matching = courseMatches
             ? own
             : own.filter((kit) => kit.title.toLowerCase().includes(q));

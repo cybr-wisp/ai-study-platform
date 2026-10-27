@@ -9,7 +9,8 @@ class StudyKitViewSet(StudyKitViewSetBase):
         user = self.request.user
         active = Q(flashcards__is_archived=False)
         mastered = active & Q(flashcards__progress__user=user, flashcards__progress__is_mastered=True)
-        return super().get_queryset().annotate(
+        # The aggregates add a GROUP BY, which makes Django ignore Meta.ordering.
+        return super().get_queryset().order_by('-created_at', '-id').annotate(
             flashcard_count=Count('flashcards', filter=active, distinct=True),
             mastered_count=Count('flashcards', filter=mastered, distinct=True),
         ).annotate(
