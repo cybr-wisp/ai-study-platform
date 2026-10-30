@@ -2,7 +2,12 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { deleteStudyKit, updateCourse, updateStudyKit } from "../../lib/api";
+import {
+  deleteCourse,
+  deleteStudyKit,
+  updateCourse,
+  updateStudyKit,
+} from "../../lib/api";
 import dialogStyles from "../layout/Dialog.module.css";
 import styles from "./CourseEditDialog.module.css";
 import type { Course, StudyKit, StudyKitType } from "./types";
@@ -33,6 +38,7 @@ export default function CourseEditDialog({
   const [drafts, setDrafts] = useState<KitDraft[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   // Start from fresh drafts each time a course is opened. Not keyed on kits,
   // so a background refresh doesn't wipe edits in progress.
@@ -50,6 +56,7 @@ export default function CourseEditDialog({
         })),
       );
       setError(null);
+      setConfirmingDelete(false);
       dialog.showModal();
     } else if (!course && dialog.open) {
       dialog.close();
@@ -93,6 +100,22 @@ export default function CourseEditDialog({
       return;
     }
     onClose();
+  }
+
+  async function handleDeleteCourse() {
+    if (!course) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await deleteCourse(course.id);
+      onSaved();
+      onClose();
+    } catch {
+      setError("Could not delete the course. Please try again.");
+      setConfirmingDelete(false);
+    } finally {
+      setSaving(false);
+    }
   }
 
   const invalid =
@@ -168,18 +191,53 @@ export default function CourseEditDialog({
             {error}
           </p>
         )}
-        <div className={dialogStyles.actions}>
-          <button type="button" className={dialogStyles.button} onClick={onClose}>
-            Cancel
-          </button>
-          <button
-            type="submit"
-            className={`${dialogStyles.button} ${dialogStyles.primary}`}
-            disabled={saving || invalid}
-          >
-            {saving ? "Saving…" : "Save"}
-          </button>
-        </div>
+        {confirmingDelete ? (
+          <div className={styles.confirm} role="alert">
+            <p className={styles.confirmText}>
+              Delete {course?.title} and all of its study kits and materials? This
+              can&apos;t be undone.
+            </p>
+            <div className={dialogStyles.actions}>
+              <button
+                type="button"
+                className={dialogStyles.button}
+                disabled={saving}
+                onClick={() => setConfirmingDelete(false)}
+              >
+                Keep course
+              </button>
+              <button
+                type="button"
+                className={`${dialogStyles.button} ${styles.danger}`}
+                disabled={saving}
+                onClick={handleDeleteCourse}
+              >
+                {saving ? "Deleting…" : "Delete course"}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className={dialogStyles.actions}>
+            <button
+              type="button"
+              className={`${dialogStyles.button} ${styles.dangerOutline}`}
+              disabled={saving}
+              onClick={() => setConfirmingDelete(true)}
+            >
+              Delete course
+            </button>
+            <button type="button" className={dialogStyles.button} onClick={onClose}>
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className={`${dialogStyles.button} ${dialogStyles.primary}`}
+              disabled={saving || invalid}
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+          </div>
+        )}
       </form>
     </dialog>
   );

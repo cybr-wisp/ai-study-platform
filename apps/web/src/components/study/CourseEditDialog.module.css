@@ -39,6 +39,31 @@
   white-space: nowrap;
 }
 
+.dangerOutline {
+  margin-right: auto;
+  border-color: #b42318;
+  color: #b42318;
+}
+
+.danger {
+  background: #b42318;
+  border-color: #b42318;
+  color: #fff;
+}
+
+.confirm {
+  margin-top: 8px;
+  padding: 12px;
+  background: #fef3f2;
+  border: 1px solid #fecdca;
+  border-radius: 8px;
+}
+
+.confirmText {
+  margin: 0 0 4px;
+  font-size: 14px;
+}
+
 .empty {
   margin: 0 0 12px;
   font-size: 14px;

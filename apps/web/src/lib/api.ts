@@ -54,6 +54,11 @@ export function updateCourse(id: number, input: { title: string }): Promise<Cour
   });
 }
 
+/** Deletes the course and everything under it (study kits, materials). */
+export function deleteCourse(id: number): Promise<null> {
+  return request<null>(`/courses/${id}`, { method: "DELETE" });
+}
+
 export function updateStudyKit(
   id: number,
   input: Partial<Pick<StudyKit, "title" | "kit_type">>,
