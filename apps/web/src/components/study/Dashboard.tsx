@@ -4,12 +4,20 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { listCourses, listStudyKits } from "../../lib/api";
 import AddMaterialsDialog from "../upload/AddMaterialsDialog";
 import UploadTile from "../upload/UploadTile";
+import CourseEditDialog from "./CourseEditDialog";
 import CourseSection from "./CourseSection";
 import MaterialCard from "./MaterialCard";
 import styles from "./Dashboard.module.css";
 import type { Course, StudyKit } from "./types";
 
 type ViewMode = "class" | "study-kit";
+
+/** A course's kits, oldest first (Lecture 1, Lecture 2, ...). */
+function kitsForCourse(kits: StudyKit[], courseId: number): StudyKit[] {
+  return kits
+    .filter((kit) => kit.course === courseId)
+    .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id - b.id);
+}
 
 export default function Dashboard() {
   const [courses, setCourses] = useState<Course[]>([]);
@@ -19,6 +27,7 @@ export default function Dashboard() {
   const [query, setQuery] = useState("");
   const [mode, setMode] = useState<ViewMode>("class");
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [editingCourse, setEditingCourse] = useState<Course | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -50,10 +59,7 @@ export default function Dashboard() {
       courses
         .map((course) => {
           const courseMatches = course.title.toLowerCase().includes(q);
-          // Oldest first within a course (Lecture 1, Lecture 2, ...).
-          const own = kits
-            .filter((kit) => kit.course === course.id)
-            .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id - b.id);
+          const own = kitsForCourse(kits, course.id);
           const matching = courseMatches
             ? own
             : own.filter((kit) => kit.title.toLowerCase().includes(q));
@@ -150,7 +156,12 @@ export default function Dashboard() {
           </p>
         ) : mode === "class" ? (
           sections.map(({ course, kits: sectionKits }) => (
-            <CourseSection key={course.id} course={course} kits={sectionKits} />
+            <CourseSection
+              key={course.id}
+              course={course}
+              kits={sectionKits}
+              onEdit={setEditingCourse}
+            />
           ))
         ) : (
           <div className={styles.flat}>
@@ -170,6 +181,13 @@ export default function Dashboard() {
         courses={courses}
         onClose={() => setDialogOpen(false)}
         onChanged={load}
+      />
+
+      <CourseEditDialog
+        course={editingCourse}
+        kits={editingCourse ? kitsForCourse(kits, editingCourse.id) : []}
+        onClose={() => setEditingCourse(null)}
+        onSaved={load}
       />
     </main>
   );

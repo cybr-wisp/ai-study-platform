@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import type { DragEvent, FormEvent } from "react";
 import { ApiError, createCourse, uploadDocument } from "../../lib/api";
 import type { Course } from "../study/types";
+import dialogStyles from "../layout/Dialog.module.css";
 import styles from "./AddMaterialsDialog.module.css";
 
 const ACCEPTED_EXTENSIONS = ["pdf", "pptx", "docx", "txt", "md"];
@@ -110,11 +111,11 @@ export default function AddMaterialsDialog({
   return (
     <dialog
       ref={dialogRef}
-      className={styles.dialog}
+      className={dialogStyles.dialog}
       aria-labelledby="add-materials-title"
       onClose={onClose}
     >
-      <h2 id="add-materials-title" className={styles.title}>
+      <h2 id="add-materials-title" className={dialogStyles.title}>
         Add course materials
       </h2>
 
@@ -123,8 +124,8 @@ export default function AddMaterialsDialog({
           <p className={styles.success} role="status">
             Uploaded {uploadedName}.
           </p>
-          <div className={styles.actions}>
-            <button type="button" className={styles.button} onClick={onClose}>
+          <div className={dialogStyles.actions}>
+            <button type="button" className={dialogStyles.button} onClick={onClose}>
               Done
             </button>
           </div>
@@ -167,10 +168,10 @@ export default function AddMaterialsDialog({
             }}
           />
 
-          <label className={styles.field}>
+          <label className={dialogStyles.field}>
             Course
             <select
-              className={styles.input}
+              className={dialogStyles.input}
               value={courseChoice}
               onChange={(e) => setCourseChoice(e.target.value)}
             >
@@ -183,10 +184,10 @@ export default function AddMaterialsDialog({
             </select>
           </label>
           {courseChoice === NEW_COURSE && (
-            <label className={styles.field}>
+            <label className={dialogStyles.field}>
               New course name
               <input
-                className={styles.input}
+                className={dialogStyles.input}
                 value={newCourseTitle}
                 maxLength={200}
                 required
@@ -196,17 +197,17 @@ export default function AddMaterialsDialog({
           )}
 
           {error && (
-            <p className={styles.error} role="alert">
+            <p className={dialogStyles.error} role="alert">
               {error}
             </p>
           )}
-          <div className={styles.actions}>
-            <button type="button" className={styles.button} onClick={onClose}>
+          <div className={dialogStyles.actions}>
+            <button type="button" className={dialogStyles.button} onClick={onClose}>
               Cancel
             </button>
             <button
               type="submit"
-              className={`${styles.button} ${styles.primary}`}
+              className={`${dialogStyles.button} ${dialogStyles.primary}`}
               disabled={submitting || !file || needsTitle}
             >
               {submitting ? "Uploading…" : "Upload"}

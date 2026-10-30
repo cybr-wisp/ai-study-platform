@@ -47,6 +47,27 @@ export function createCourse(input: { title: string }): Promise<Course> {
   });
 }
 
+export function updateCourse(id: number, input: { title: string }): Promise<Course> {
+  return request<Course>(`/courses/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateStudyKit(
+  id: number,
+  input: Partial<Pick<StudyKit, "title" | "kit_type">>,
+): Promise<StudyKit> {
+  return request<StudyKit>(`/study-kits/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export function deleteStudyKit(id: number): Promise<null> {
+  return request<null>(`/study-kits/${id}`, { method: "DELETE" });
+}
+
 export function uploadDocument(input: {
   courseId: number;
   file: File;
