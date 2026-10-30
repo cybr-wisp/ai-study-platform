@@ -40,6 +40,13 @@ export async function listStudyKits(): Promise<StudyKit[]> {
   return page.results;
 }
 
+export function createCourse(input: { title: string }): Promise<Course> {
+  return request<Course>("/courses", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
 export function uploadDocument(input: {
   courseId: number;
   file: File;

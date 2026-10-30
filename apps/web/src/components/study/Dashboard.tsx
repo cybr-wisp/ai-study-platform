@@ -169,6 +169,7 @@ export default function Dashboard() {
         open={dialogOpen}
         courses={courses}
         onClose={() => setDialogOpen(false)}
+        onChanged={load}
       />
     </main>
   );
