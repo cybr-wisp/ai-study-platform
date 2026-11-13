@@ -9,6 +9,10 @@
   border-radius: 14px;
 }
 
+.card:hover {
+  filter: brightness(0.96);
+}
+
 .lecture {
   background: #d4f7d0;
 }

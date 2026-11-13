@@ -40,6 +40,21 @@ export async function listStudyKits(): Promise<StudyKit[]> {
   return page.results;
 }
 
+export function getCourse(id: number): Promise<Course> {
+  return request<Course>(`/courses/${id}`);
+}
+
+export function getStudyKit(id: number): Promise<StudyKit> {
+  return request<StudyKit>(`/study-kits/${id}`);
+}
+
+export async function listCourseDocuments(courseId: number): Promise<Document[]> {
+  const page = await request<Page<Document>>(
+    `/materials/documents?course=${courseId}&page_size=${PAGE_SIZE}`,
+  );
+  return page.results;
+}
+
 export function createCourse(input: { title: string }): Promise<Course> {
   return request<Course>("/courses", {
     method: "POST",

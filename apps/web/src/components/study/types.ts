@@ -1,5 +1,7 @@
 export type StudyKitType = "lecture" | "tutorial";
 
+export type StudyKitStatus = "pending" | "generating" | "ready" | "failed";
+
 export interface Course {
   id: number;
   title: string;
@@ -14,6 +16,12 @@ export interface StudyKit {
   course: number;
   title: string;
   kit_type: StudyKitType;
+  status: StudyKitStatus;
+  summary: string;
+  study_guide: string;
+  /** IDs of the documents the kit was generated from. */
+  documents: number[];
+  flashcard_count: number;
   /** Mastery of the kit's flashcards, 0-100. */
   mastery_percent: number;
   created_at: string;

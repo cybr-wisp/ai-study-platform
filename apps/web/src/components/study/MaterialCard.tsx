@@ -1,3 +1,4 @@
+import Link from "next/link";
 import styles from "./MaterialCard.module.css";
 import type { StudyKit } from "./types";
 
@@ -11,7 +12,10 @@ export default function MaterialCard({ kit, courseName }: MaterialCardProps) {
   const progress = Math.round(Math.max(0, Math.min(100, kit.mastery_percent)));
 
   return (
-    <div className={`${styles.card} ${styles[kit.kit_type]}`}>
+    <Link
+      href={`/study-kits/${kit.id}`}
+      className={`${styles.card} ${styles[kit.kit_type]}`}
+    >
       <div>
         {courseName && <span className={styles.course}>{courseName}</span>}
         <span className={styles.title}>{kit.title}</span>
@@ -29,6 +33,6 @@ export default function MaterialCard({ kit, courseName }: MaterialCardProps) {
         </div>
         <span className={styles.percent}>{progress}%</span>
       </div>
-    </div>
+    </Link>
   );
 }
