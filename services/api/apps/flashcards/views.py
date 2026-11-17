@@ -4,6 +4,7 @@ from rest_framework import generics, status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from django.views.generic import TemplateView
 
 from .models import Flashcard, StudyAttempt
 from .serializers import FlashcardSerializer, StudyAttemptSerializer
@@ -56,6 +57,18 @@ class NextCardsView(APIView):
         return Response(FlashcardSerializer(cards, many=True).data)
 
 
+class StudyStatsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        stats = StudyAttempt.objects.filter(user=request.user).aggregate(
+            total=Count('id'),
+            correct=Count('id', filter=Q(is_correct=True)),
+            avg_confidence=Avg('confidence'),
+        )
+        stats['accuracy'] = stats['correct'] / stats['total'] if stats['total'] else None
+        return Response(stats)
+    
 class StudyStatsView(APIView):
     permission_classes = [IsAuthenticated]
 
